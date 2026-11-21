@@ -493,6 +493,15 @@ function morgueMode() {
   if (archive?.kv('fulltextEnabled') === false) return 'adhoc';          // (paused, before modes existed)
   return accounts.settings().setupDone ? 'auto' : 'fragment';
 }
+// an outlet can have its own mode (source.morgueMode); otherwise it follows the server's
+const modeFor = (sourceId) => { const m = sourceId && byId(sourceId)?.morgueMode; return MORGUE_MODES.includes(m) ? m : morgueMode(); };
+const sourceModes = () => Object.fromEntries(db.sources.filter((x) => MORGUE_MODES.includes(x.morgueMode)).map((x) => [x.id, x.morgueMode]));
+// a source edit's morgueMode: a mode, or '' / 'default' (follow the server) → undefined; anything else → an error
+function cleanSourceMode(v) {
+  if (v === undefined) return { skip: true };
+  if (v === null || v === '' || v === 'default') return { mode: undefined };
+  return MORGUE_MODES.includes(v) ? { mode: v } : { error: 'morgueMode must be default, auto, adhoc, manual or fragment' };
+}
 // in any mode: every incoming headline + summary is filed as a fragment (on unless turned off)
 const fragmentAll = () => archive?.kv('fragmentAll') !== false;
 function setFragmentAll(on) { archive.kv('fragmentAll', !!on); harvest?.setFragmentAll(!!on); }
@@ -533,7 +542,7 @@ function resolveArticle(link, by = null) {
   const site = db.sources.find((s) => s.id === a.sourceId)?.name || '';
   const morgue = archive.fileFragment(row.id, { title: a.title, summary: a.summary || '', link: a.link, site }, by);
   // filed without its text yet (a fragment): fetch it now — except in fragment mode, which files headline + summary only
-  if (archive.bodyState(row.id)?.status === 'fragment' && morgueMode() !== 'fragment') harvest?.file([{ link: a.link, sourceId: a.sourceId }]);
+  if (archive.bodyState(row.id)?.status === 'fragment' && modeFor(a.sourceId) !== 'fragment') harvest?.file([{ link: a.link, sourceId: a.sourceId }]);
   return { link: a.link, title: a.title, sourceId: a.sourceId, date: a.date, summary: a.summary || '', morgue };
 }
 function planBases(plans, ids) {
@@ -1331,7 +1340,7 @@ async function handleApi(req, res, url) {
       const archived = !!row && (row.published < Date.now() - LIVE_DAYS * 864e5 || row.origin !== 'live');
       let r = await readArticle(link, { wayback: true, anyFailure: archived, date: row?.published ?? (Number(url.searchParams.get('date')) || null) });
       // manual / fragment mode: reading doesn't file it (binder saves and "File in the morgue" do)
-      const mm = morgueMode();
+      const mm = modeFor(id != null ? archive.st.byId.get(id)?.source_id : null);       // (the outlet's own mode, if it has one)
       if ((mm === 'manual' || mm === 'fragment') && !stored?.morgue) {
         const no = id != null ? archive.morgueOf(id) : null;               // (already filed as a fragment: say so)
         return send(res, 200, finish({ ...r, notFiled: mm, ...(no ? { morgue: no, fragment: true, filedBy: filerName(archive.filedByOf(id)) } : {}) }));
@@ -1469,7 +1478,7 @@ async function handleApi(req, res, url) {
     if (!art) return send(res, 404, { error: "that article isn't in the live feeds or the archive" });
     const bs = archive.bodyState(archive.articleId(art.link));
     // (its text is on its way unless: fragment mode, or the site already refused it — that's the Wayback sweep's)
-    const fetching = bs?.status === 'fragment' && morgueMode() !== 'fragment' && !(bs.tries > 0 && Archive.refused(bs.reason));
+    const fetching = bs?.status === 'fragment' && modeFor(art.sourceId) !== 'fragment' && !(bs.tries > 0 && Archive.refused(bs.reason));
     return send(res, 200, { morgue: art.morgue, link: art.link, fetching, filedBy: filerName(archive.filedByOf(archive.articleId(art.link))) });
   }
 
@@ -1755,10 +1764,13 @@ async function handleApi(req, res, url) {
       while (byId(sid)) sid = `${slug(name)}-${crypto.randomBytes(2).toString('hex')}`;
       let site = String(b.site || '');
       if (!/^https?:\/\//i.test(site)) site = new URL(feed).origin;
-      const s = { id: sid, name, bias, type: b.type === 'legacy' ? 'legacy' : 'new', site, feed, enabled: true, custom: true };
+      const sm = cleanSourceMode(b.morgueMode);
+      if (sm.error) return send(res, 400, { error: sm.error });
+      const s = { id: sid, name, bias, type: b.type === 'legacy' ? 'legacy' : 'new', site, feed, enabled: true, custom: true, ...(sm.mode ? { morgueMode: sm.mode } : {}) };
       db.sources.push(s);
       db.removedDefaults = db.removedDefaults.filter((x) => x !== sid);
       await saveDb();
+      if (s.morgueMode) harvest?.setSourceModes(sourceModes());
       await refreshOne(s);
       return send(res, 201, sourceView(s, ctx));
     }
@@ -1787,6 +1799,12 @@ async function handleApi(req, res, url) {
       if (b.name !== undefined) s.name = String(b.name).trim().slice(0, 80) || s.name;
       if (b.bias !== undefined) { if (!validBias(Number(b.bias))) return send(res, 400, { error: 'bias must be -2..2' }); s.bias = Number(b.bias); }
       if (b.type !== undefined) s.type = b.type === 'legacy' ? 'legacy' : 'new';
+      const sm = cleanSourceMode(b.morgueMode);
+      if (sm.error) return send(res, 400, { error: sm.error });
+      if (!sm.skip && (s.morgueMode || undefined) !== sm.mode) {
+        if (sm.mode) s.morgueMode = sm.mode; else delete s.morgueMode;
+        harvest?.setSourceModes(sourceModes());
+      }
       if (b.enabled !== undefined) {
         s.enabled = !!b.enabled;
         if (s.enabled && !cache.has(s.id)) refreshOne(s);
@@ -1889,7 +1907,7 @@ try {
   // crawling, parsing and bulk inserts run in a worker thread so they never stall web requests
   backfill = new BackfillWorker({ dbFile: path.join(DATA_DIR, 'archive.db'), getSources: () => db.sources, autostart: process.env.BACKFILL !== '0', log: (m) => console.log(m) });
   // the auto-filer: fetches and files article text — every live-feed article in auto mode, otherwise what people file
-  harvest = new HarvestWorker({ dbFile: path.join(DATA_DIR, 'archive.db'), mode: morgueMode(), fragmentAll: fragmentAll(),
+  harvest = new HarvestWorker({ dbFile: path.join(DATA_DIR, 'archive.db'), mode: morgueMode(), sourceModes: sourceModes(), fragmentAll: fragmentAll(),
     backlogDays: Number(process.env.FULLTEXT_BACKLOG_DAYS) || 7, log: (m) => console.log(m) });
 } catch (e) {
   console.error('[archive] disabled:', e.message);

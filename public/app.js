@@ -2248,9 +2248,13 @@ function openSourceDialog(src = null, prefillUrl = '') {
     $('#f-name').value = src.name;
     form.querySelector(`input[name=bias][value="${src.bias}"]`).checked = true;
     form.querySelector(`input[name=type][value="${src.type}"]`).checked = true;
+    form.querySelector(`input[name=morgueMode][value="${MORGUE_MODES[src.morgueMode] ? src.morgueMode : ''}"]`).checked = true;
   } else if (prefillUrl) {
     $('#f-url').value = prefillUrl;
   }
+  // DEFAULT shows what the server's mode is right now
+  $('#f-morgue-default').textContent = 'DEFAULT';
+  api('archive').then((a) => { const m = a.fulltext?.harvester?.mode; if (MORGUE_MODES[m]) $('#f-morgue-default').textContent = `DEFAULT (${MORGUE_MODES[m][0]})`; }).catch(() => {});
   dlg.showModal();
   (src ? $('#f-name') : $('#f-url')).focus();
   if (prefillUrl && !src) discover();
@@ -2286,7 +2290,7 @@ form.addEventListener('submit', async (e) => {
   if (e.submitter?.value !== 'save') return;
   e.preventDefault();
   const fd = new FormData(form);
-  const body = { name: fd.get('name'), feed: fd.get('feed'), bias: Number(fd.get('bias')), type: fd.get('type'), site: state.discoveredSite || undefined };
+  const body = { name: fd.get('name'), feed: fd.get('feed'), bias: Number(fd.get('bias')), type: fd.get('type'), site: state.discoveredSite || undefined, morgueMode: fd.get('morgueMode') || 'default' };
   const btn = $('#btn-save');
   btn.disabled = true;
   formError('');
@@ -2300,6 +2304,7 @@ form.addEventListener('submit', async (e) => {
     }
     dlg.close();
     await loadSources();
+    if (arDlg.open) loadArchiveStatus();                  // (opened from the archive popover's ⚙: show the change there)
     await loadNews();
   } catch (err) { formError(err.message); }
   finally { btn.disabled = false; }
@@ -2912,29 +2917,40 @@ async function loadArchiveStatus() {
 // scroll position and a half-picked date are never disturbed.
 let arPicker = null, arSinceDirty = false;
 function archiveShell() {
+  const help = (head, text) => `<span class="dt-help ar-help" title="${esc(text)}" data-tip-head="${esc(head)}">ⓘ</span>`;
   $('#archive-body').innerHTML = `
-    <div class="dlg-head"><span>// HISTORICAL ARCHIVE</span><button type="button" class="link" data-act="close" title="close (esc)">[esc]</button></div>
-    <div class="ar-summary">
-      <div><b class="big" id="ar-total">—</b> articles from <b id="ar-outlets">—</b> outlets</div>
-      <div class="ar-ctl">backfill <b id="ar-state">—</b> · back to
+    <div class="st-head">
+      <div class="dlg-head"><span>// HISTORICAL ARCHIVE</span><button type="button" class="link" data-act="close" title="close (esc)">[esc]</button></div>
+      <div class="ar-status ok" id="ar-status">—</div>
+    </div>
+    <section class="ar-sec">
+      <h4>CATALOG ${help('THE CATALOG', 'Every headline STRINGER knows, searchable with date: / age: queries. It grows from the live feeds and from the backfill, which crawls each outlet back to the date you pick: outlet sitemaps (headlines rebuilt from the URL, shown with ≈ — "real" counts the rest) · Wayback Machine snapshots of each RSS feed (real headlines, sampled monthly → weekly → daily) · the Hacker News API. Outlets that block the crawler fill from the Wayback Machine only.')}</h4>
+      <div class="st-tiles ar-tiles" id="ar-cat-tiles"></div>
+      <div class="ar-ctl">backfill <b id="ar-state">—</b> <span class="dim">· back to</span>
         <input id="ar-since" />
         <button type="button" data-act="start" id="ar-start" class="needs-perm-archive-manage">START</button>
-        <button type="button" data-act="pause" id="ar-pause" class="needs-perm-archive-manage">PAUSE</button>
-        <span class="dim small" id="ar-active"></span></div>
-      <div class="ar-ctl">morgue <b id="ft-state">—</b> · <b id="ft-total">—</b> articles filed<span id="ft-frags" class="dim" title="headline and summary only"></span> (<span id="ft-words">—</span> words) · <span id="ft-day">—</span> in 24h
+        <button type="button" data-act="pause" id="ar-pause" class="needs-perm-archive-manage">PAUSE</button></div>
+    </section>
+    <section class="ar-sec">
+      <h4>MORGUE ${help('THE MORGUE', 'Articles fetched once, run through the reader-view extraction and filed under a morgue no. — their text is indexed for body: / author: / words: / morgue: queries, and the reader opens the morgue copy. The mode decides what gets filed (hover the buttons); outlets can have their own. In every mode a binder save files the article, right-click → File in the morgue files any article, and removing something from a binder never unfiles it. Fragments are headline + summary only. Sites that refuse requests (HTTP 401/403) are left alone; their articles are filed from the Wayback Machine’s copy once it has one.')}</h4>
+      <div class="st-tiles ar-tiles" id="ar-morgue-tiles"></div>
+      <div class="ar-ctl">mode <b id="ft-state">—</b>
         <span class="ft-modes needs-perm-archive-manage">${Object.entries(MORGUE_MODES).map(([k, [l, d]]) => `<button type="button" data-act="ft-mode" data-mode="${k}" title="${esc(d)}">${l}</button>`).join('')}</span>
-        <span class="dim small" id="ft-queue"></span></div>
-      <div class="ar-ctl dim small" id="ft-mode-desc"></div>
-      <label class="ar-ctl small chk needs-perm-archive-manage" title="each article's headline and summary get a morgue no. as they arrive from the feeds — a record of good headlines and summaries even when the text is never fetched (in auto and ad-hoc mode the full text replaces it later, keeping the number)"><input type="checkbox" id="ft-fragall" /> also file every incoming headline + summary as a fragment</label>
+        <label class="chk small needs-perm-archive-manage" title="each article's headline and summary get a morgue no. as they arrive from the feeds — a record of good headlines and summaries even when the text is never fetched (in auto and ad-hoc mode the full text replaces it later, keeping the number)"><input type="checkbox" id="ft-fragall" /> fragment every incoming headline</label></div>
       <div class="ar-ctl small" id="ft-filers"></div>
-      <div class="ar-ctl" id="ar-disk"></div>
-      <div class="dim small">the morgue: articles are fetched once, run through the reader-view extraction and filed in the STRINGER morgue under a morgue no. — its text is indexed for <b>body:</b> / <b>author:</b> / <b>words:</b> / <b>morgue:</b> queries, and the reader opens the morgue copy. The mode decides what gets filed (hover the buttons); in every mode a binder save files the article, right-click → <b>File in the morgue</b> files any article, and removing something from a binder never unfiles it. Fragments are headline + summary only. Sites that refuse requests (HTTP 401/403) are left alone; their articles are filed from the Wayback Machine's copy once it has one.</div>
-      <div class="dim small">sources: outlet sitemaps (headlines rebuilt from URLs, shown with ≈) · Wayback Machine snapshots of each RSS feed (real headlines, sampled monthly → weekly → daily) · live feeds · Hacker News API. Blocked outlets fill from the Wayback Machine only.</div>
-    </div>
-    <div class="ar-table-wrap"><table class="ar-table">
-      <thead><tr><th>outlet</th><th>articles</th><th>earliest</th><th>depth</th><th title="share of real (not URL-derived) headlines">real</th><th>sitemaps</th><th>wayback</th><th title="articles filed in the morgue from the live feeds: complete · fragments (paywall) · refused/failed">morgue</th><th></th></tr></thead>
-      <tbody id="ar-tbody"></tbody>
-    </table></div>`;
+    </section>
+    <section class="ar-sec">
+      <h4>STORAGE ${help('STORAGE', 'archive.db (with its write-ahead log) holds the headline catalog, its search index and the morgue. The disk bar is the whole disk the data directory is on.')}</h4>
+      <div class="st-tiles ar-tiles" id="ar-disk-tiles"></div>
+    </section>
+    <section class="ar-sec">
+      <h4>BY OUTLET ${help('BY OUTLET', 'articles = headlines in the catalog · earliest = the oldest one · depth = how far back that reaches · real = share of real (not URL-derived) headlines · sitemaps / wayback = backfill progress · morgue = filed · +fragments · ✗ couldn’t be filed. ▣ marks an outlet with its own morgue mode.')}</h4>
+      <div class="ar-table-wrap"><table class="ar-table">
+        <thead><tr><th>outlet</th><th>articles</th><th>earliest</th><th>depth</th><th title="share of real (not URL-derived) headlines">real</th><th>sitemaps</th><th>wayback</th><th title="articles filed in the morgue: complete · fragments · refused/failed">morgue</th><th></th><th class="needs-perm-sources-manage"></th></tr></thead>
+        <tbody id="ar-tbody"></tbody>
+      </table></div>
+    </section>
+    <div class="st-foot-bar"><span class="dim" title="an outlet's own morgue mode: edit the outlet (edit <outlet>)">esc close · <b>archive start [date]</b> · <b>archive pause</b> · <b>morgue &lt;mode&gt;</b> · <b>morgue fragments on|off</b></span><button type="button" data-act="close">CLOSE</button></div>`;
   arSinceDirty = false;
   arPicker = attachDatePicker($('#ar-since'), { min: '1980-01-01', max: isoDay(Date.now()), presets: ['1990-01-01', '2000-01-01', '2010-01-01', '2015-01-01', '2020-01-01'] });
   $('#ar-since').addEventListener('input', () => { arSinceDirty = true; });
@@ -2944,6 +2960,8 @@ function renderArchive(a) {
   if (!$('#ar-tbody')) archiveShell();
   const b = a.backfill;
   const rows = Object.entries(a.sources).sort((x, y) => x[1].bias - y[1].bias || y[1].count - x[1].count);
+  const tile = (label, value, sub = '', tip = '') => `<div class="st-tile"${tip ? ` title="${esc(tip)}"` : ''}><div class="st-tile-l">${label}</div><div class="st-tile-v">${value}</div>${sub ? `<div class="st-tile-s">${sub}</div>` : ''}</div>`;
+  const pctOf = (n, d) => (d ? `${Math.round((100 * n) / d)}%` : '—');
   const prog = (f) => {
     if (!f) return '<span class="dim">—</span>';
     const tot = f.pending + f.done + f.error + f.skip;
@@ -2951,59 +2969,92 @@ function renderArchive(a) {
     const pct = Math.floor((100 * (tot - f.pending)) / tot);
     return `<span class="ar-bar" title="${tot - f.pending}/${tot} files"><span style="width:${pct}%"></span></span> ${pct}%${f.error ? ` <span class="err" title="${f.error} failed">${f.error}✗</span>` : ''}`;
   };
-  const ft = a.fulltext;
-  if (ft) {
-    const h = ft.harvester || {};
-    const mm = MORGUE_MODES[h.mode] ? h.mode : 'auto';
-    $('#ft-state').textContent = MORGUE_MODES[mm][0];
-    $('#ft-state').className = mm === 'auto' ? 'ok' : 'warn';
-    $('#ft-state').title = MORGUE_MODES[mm][1];
-    for (const b of $$('.ft-modes [data-mode]')) b.classList.toggle('on', b.dataset.mode === mm);
-    $('#ft-mode-desc').textContent = MORGUE_MODES[mm][1];
-    $('#ft-fragall').checked = h.fragmentAll !== false;
-    $('#ft-total').textContent = ((ft.ok || 0) + (ft.partial || 0)).toLocaleString();
-    $('#ft-frags').textContent = ft.fragment ? ` + ${ft.fragment.toLocaleString()} fragments` : '';
-    $('#ft-words').textContent = fmtN(ft.words || 0);
-    $('#ft-day').textContent = (ft.lastDay ?? 0).toLocaleString();
-    // who filed what: opening an unfiled article in the reader (or saving it to a binder) files it in your name;
-    // the rest is the auto-filer's
-    const fl = ft.filers || [];
-    $('#ft-filers').innerHTML = fl.length ? `<span class="dim">filed by</span> ${fl.slice(0, 8).map((f) => `<span title="${esc(f.auto ? 'fetched and filed automatically as articles appear in the feeds' : f.untracked ? 'filed before STRINGER recorded who filed what' : 'filed when they opened it in the reader or saved it to a binder')}">${f.untracked ? '<span class="dim">' : f.auto ? '' : '<b>'}${esc(f.name)}${f.untracked ? '</span>' : f.auto ? '' : '</b>'} <span class="dim">${f.n.toLocaleString()}</span></span>`).join(' · ')}${fl.length > 8 ? ` <span class="dim">· +${fl.length - 8} more</span>` : ''}` : '';
-    $('#ft-queue').textContent = h.running ? `· ${h.queued || 0} queued${h.active ? `, ${h.active} fetching` : ''}${h.cooling?.length ? ` · ${h.cooling.length} sites resting` : ''}` : '';
-    {
-      const sites = (h.cooling || []).filter((c) => c.host !== 'web.archive.org'), wb = (h.cooling || []).find((c) => c.host === 'web.archive.org');
-      $('#ft-queue').title = [
-        sites.length ? `these sites refused several requests in a row (HTTP 401/403), so they are left alone for 6h — their articles are filed from the Wayback Machine's copy once it has one:\n${sites.map((c) => c.host).join(', ')}` : '',
-        wb ? `Wayback Machine lookups are paused until ${new Date(wb.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (it was unavailable or asked us to slow down)` : '',
-      ].filter(Boolean).join('\n\n');
-    }
-  } else $('#ft-state').textContent = 'off';
-  const dk = a.disk;
-  if (dk) {
-    const gb = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e11 ? 0 : 1)} GB` : n >= 1e6 ? `${Math.round(n / 1e6)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`);
-    const filed = ft ? (ft.ok || 0) + (ft.partial || 0) : 0;
-    $('#ar-disk').innerHTML = `on disk <b title="archive.db and its write-ahead log">${gb(dk.total)}</b>
-      ${dk.morgue != null ? `<span class="dim">·</span> morgue <b>${gb(dk.morgue)}</b>${filed ? ` <span class="dim">(~${gb(dk.morgue / filed)} per article)</span>` : ''} <span class="dim">·</span> headline catalog &amp; search index <b>${gb(dk.total - dk.morgue)}</b>` : ''}
-      ${dk.free != null ? `<span class="dim">· ${gb(dk.free)} free of ${gb(dk.disk)} on this disk</span>` : ''}`;
-  }
-  const depth = (s) => (s.first ? ((Date.now() - s.first) / 31557600000).toFixed(1) + 'y' : '—');
-  const active = new Map(b.active.map((x) => [x.source, x.kind]));
-  $('#ar-total').textContent = a.total.toLocaleString();
-  $('#ar-outlets').textContent = `${rows.filter((r) => r[1].count).length}/${rows.length}`;
+  const srcName = (id) => srcById(id)?.name || id;
+
+  // ── catalog ──
+  const withArticles = rows.filter((r) => r[1].count);
+  const firsts = withArticles.map((r) => r[1].first).filter(Boolean), lasts = withArticles.map((r) => r[1].last).filter(Boolean);
+  const real = rows.reduce((t, r) => t + (r[1].real || 0), 0), counted = rows.reduce((t, r) => t + (r[1].count || 0), 0);
+  const files = { sitemap: { pending: 0, done: 0, error: 0, skip: 0 }, wayback: { pending: 0, done: 0, error: 0, skip: 0 } };
+  for (const [, x] of rows) for (const k of ['sitemap', 'wayback', 'hn']) { const f = x.files?.[k]; if (!f) continue; const t = files[k === 'hn' ? 'wayback' : k]; for (const q of ['pending', 'done', 'error', 'skip']) t[q] += f[q] || 0; }
+  const crawl = (f) => { const tot = f.pending + f.done + f.error + f.skip; return tot ? `${Math.floor((100 * (tot - f.pending)) / tot)}%` : '—'; };
+  const crawlSub = (f) => { const tot = f.pending + f.done + f.error + f.skip; return tot ? `${(tot - f.pending).toLocaleString()} of ${tot.toLocaleString()} files${f.error ? ` · <span class="err">${f.error.toLocaleString()} failed</span>` : ''}` : 'nothing to crawl'; };
+  $('#ar-cat-tiles').innerHTML = [
+    tile('headlines', fmtN(a.total), `${a.total.toLocaleString()} in the catalog`),
+    tile('outlets covered', `${withArticles.length}/${rows.length}`, `${rows.length - withArticles.length} with nothing yet`),
+    tile('earliest', firsts.length ? isoDay(Math.min(...firsts)) : '—', firsts.length ? `${((Date.now() - Math.min(...firsts)) / 31557600000).toFixed(1)} years back` : ''),
+    tile('newest', lasts.length ? isoDay(Math.max(...lasts)) : '—', lasts.length ? relAge(Math.max(...lasts)) : ''),
+    tile('real headlines', pctOf(real, counted), `${fmtN(counted - real)} rebuilt from URLs (≈)`, 'the rest were rebuilt from the article URL by the sitemap crawl'),
+    tile('sitemap crawl', crawl(files.sitemap), crawlSub(files.sitemap)),
+    tile('wayback / HN crawl', crawl(files.wayback), crawlSub(files.wayback)),
+  ].join('');
   const stEl = $('#ar-state');
   stEl.textContent = b.running ? 'RUNNING' : 'PAUSED';
   stEl.className = b.running ? 'ok' : 'warn';
   $('#ar-start').textContent = b.running ? 'APPLY DATE' : 'START';
   $('#ar-pause').hidden = !b.running;
-  $('#ar-active').textContent = b.active.length ? `· now: ${b.active.map((x) => x.source).join(', ')}` : '';
   const since = $('#ar-since');
   if (b.since && !arSinceDirty && document.activeElement !== since && !arPicker?.isOpen()) since.value = new Date(b.since).toISOString().slice(0, 10);
+
+  // ── morgue ──
+  const ft = a.fulltext, h = ft?.harvester || {};
+  const status = [];
+  // what's happening right now (the header's status line)
+  if (b.running) status.push(b.active.length ? `<span class="spin">⟳</span> backfill crawling ${b.active.map((x) => `${esc(srcName(x.source))}${x.kind ? ` <span class="ar-st-dim">(${esc(x.kind)})</span>` : ''}`).join(', ')}` : '● backfill running — between files');
+  else status.push('❚❚ backfill paused');
+  if (ft) {
+    const mm = MORGUE_MODES[h.mode] ? h.mode : 'auto';
+    $('#ft-state').textContent = MORGUE_MODES[mm][0];
+    $('#ft-state').className = mm === 'auto' ? 'ok' : 'warn';
+    $('#ft-state').title = MORGUE_MODES[mm][1];
+    for (const x of $$('.ft-modes [data-mode]')) x.classList.toggle('on', x.dataset.mode === mm);
+    $('#ft-fragall').checked = h.fragmentAll !== false;
+    const filed = (ft.ok || 0) + (ft.partial || 0), bad = (ft.blocked || 0) + (ft.failed || 0), ses = h.session || {};
+    $('#ar-morgue-tiles').innerHTML = [
+      tile('filed', fmtN(filed), `${fmtN(ft.words || 0)} words · ${(ft.partial || 0).toLocaleString()} partial`, 'complete articles, and partial ones (paywall or script-rendered pages)'),
+      tile('fragments', fmtN(ft.fragment || 0), 'headline + summary only'),
+      tile("couldn't file", fmtN(bad), `${(ft.blocked || 0).toLocaleString()} refused · ${(ft.failed || 0).toLocaleString()} failed`, 'refused: the site turned the request away or the page is gone; failed: errors, timeouts, no article text'),
+      tile('filed in 24h', (ft.lastDay ?? 0).toLocaleString(), `${(ft.lastWeek ?? 0).toLocaleString()} in 7 days`),
+      tile('average length', filed ? `${Math.round((ft.words || 0) / filed).toLocaleString()}` : '—', 'words per filed article'),
+      tile('from wayback', fmtN(ft.wayback || 0), "filed from the Wayback Machine's copy"),
+      tile('this session', `${((ses.ok || 0) + (ses.partial || 0)).toLocaleString()}`, `filed since the server started${ses.blocked || ses.failed ? ` · ${((ses.blocked || 0) + (ses.failed || 0)).toLocaleString()} couldn't` : ''}${ses.wayback ? ` · ${ses.wayback} via Wayback` : ''}`),
+    ].join('');
+    // who filed what: opening an unfiled article in the reader (or saving it to a binder) files it in your name;
+    // the rest is the auto-filer's
+    const fl = ft.filers || [];
+    $('#ft-filers').innerHTML = fl.length ? `<span class="dim">filed by</span> ${fl.slice(0, 8).map((f) => `<span title="${esc(f.auto ? 'fetched and filed automatically as articles appear in the feeds' : f.untracked ? 'filed before STRINGER recorded who filed what' : 'filed when they opened it in the reader or saved it to a binder')}">${f.untracked ? '<span class="dim">' : f.auto ? '' : '<b>'}${esc(f.name)}${f.untracked ? '</span>' : f.auto ? '' : '</b>'} <span class="dim">${f.n.toLocaleString()}</span></span>`).join(' · ')}${fl.length > 8 ? ` <span class="dim">· +${fl.length - 8} more</span>` : ''}` : '';
+    const busy = h.active ? `fetching ${h.active}` : '';
+    status.push(`${busy ? '<span class="spin">⟳</span> ' : '● '}morgue ${MORGUE_MODES[mm][0]}${busy ? ` — ${busy}` : ''}${h.queued ? `${busy ? ',' : ' —'} ${h.queued.toLocaleString()} queued` : busy ? '' : ' — idle'}`);
+    const sites = (h.cooling || []).filter((c) => c.host !== 'web.archive.org'), wb = (h.cooling || []).find((c) => c.host === 'web.archive.org');
+    if (sites.length) status.push(`<span title="${esc(`these sites refused several requests in a row (HTTP 401/403), so they are left alone for 6h — their articles are filed from the Wayback Machine's copy once it has one:\n${sites.map((c) => c.host).join(', ')}`)}">${sites.length} site${sites.length === 1 ? '' : 's'} resting</span>`);
+    if (wb) status.push(`Wayback lookups paused until ${new Date(wb.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+  } else { $('#ft-state').textContent = 'off'; status.push('morgue unavailable'); }
+  $('#ar-status').innerHTML = status.join(' <span class="ar-st-dim">·</span> ');
+
+  // ── storage ──
+  const dk = a.disk;
+  if (dk) {
+    const gb = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e11 ? 0 : 1)} GB` : n >= 1e6 ? `${Math.round(n / 1e6)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`);
+    const filed = ft ? (ft.ok || 0) + (ft.partial || 0) : 0;
+    const usedPct = dk.disk ? Math.round((100 * (dk.disk - dk.free)) / dk.disk) : null;
+    $('#ar-disk-tiles').innerHTML = [
+      tile('on disk', gb(dk.total), 'archive.db + its write-ahead log'),
+      dk.morgue != null ? tile('morgue', gb(dk.morgue), filed ? `~${gb(dk.morgue / filed)} per filed article` : '') : '',
+      dk.morgue != null ? tile('catalog & search index', gb(dk.total - dk.morgue), a.total ? `~${gb((dk.total - dk.morgue) / a.total)} per headline` : '') : '',
+      dk.free != null ? tile('free on this disk', gb(dk.free), `<span class="ar-diskbar" title="${usedPct}% of ${gb(dk.disk)} used"><span style="width:${usedPct}%"></span></span> of ${gb(dk.disk)}`) : '',
+    ].join('');
+  }
+
+  // ── by outlet ──
+  const depth = (s) => (s.first ? ((Date.now() - s.first) / 31557600000).toFixed(1) + 'y' : '—');
+  const active = new Map(b.active.map((x) => [x.source, x.kind]));
   $('#ar-tbody').innerHTML = rows.map(([id, s]) => `<tr>
-    <td>${chip(s.bias)} ${esc(s.name)}${active.has(id) ? ` <span class="ok spin" title="crawling ${active.get(id)}">⟳</span>` : ''}</td>
+    <td>${chip(s.bias)} ${esc(s.name)}${active.has(id) ? ` <span class="ok spin" title="crawling ${active.get(id)}">⟳</span>` : ''}${MORGUE_MODES[srcById(id)?.morgueMode] ? ` <span class="src-mm" title="this outlet's own morgue mode: ${esc(MORGUE_MODES[srcById(id).morgueMode][1])} (edit the outlet to change it)">▣ ${MORGUE_MODES[srcById(id).morgueMode][0]}</span>` : ''}</td>
     <td class="num">${s.count.toLocaleString()}</td><td>${s.first ? isoDay(s.first) : '—'}</td><td class="num">${depth(s)}</td>
     <td class="num">${s.count ? Math.round((100 * s.real) / s.count) + '%' : '—'}</td>
     <td>${prog(s.files.sitemap)}</td><td>${prog(s.files.wayback || s.files.hn)}</td><td class="num">${ftCell(a.fulltext?.bySource?.[id])}</td>
-    <td class="err small" title="${esc(b.errors[id] || '')}">${b.errors[id] ? '!' : ''}</td></tr>`).join('');
+    <td class="err small" title="${esc(b.errors[id] || '')}">${b.errors[id] ? '!' : ''}</td>
+    <td class="needs-perm-sources-manage"><button type="button" class="gear" data-act="ar-edit" data-src="${esc(id)}" title="${esc(s.name)} settings — name, bias, media type, morgue mode">⚙</button></td></tr>`).join('');
 }
 
 function ftCell(f) {
@@ -3028,6 +3079,7 @@ arDlg.addEventListener('click', async (e) => {
   if (e.target === arDlg) return arDlg.close();
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'close') arDlg.close();
+  else if (act === 'ar-edit') { const s = srcById(e.target.closest('[data-src]').dataset.src); if (s) openSourceDialog(s); }
   else if (act === 'pause') { await api('archive', { method: 'POST', body: { action: 'pause' } }); log('backfill paused', 'warn'); loadArchiveStatus(); }
   else if (act === 'ft-mode') {
     const mode = e.target.closest('[data-mode]').dataset.mode;

@@ -260,6 +260,9 @@ extraction, and their text filed in the morgue with its own full-text index. **W
 | **manual** | only what's saved to a binder, or filed by hand (right-click → *File in the morgue*) |
 | **fragment** | like manual, but as fragments: headline and summary only — no page is fetched |
 
+Each **outlet** can have its own mode (edit the outlet → *morgue*; *default* follows the server's): e.g. auto for the
+outlets you read closely and fragment for the rest. The archive panel marks outlets with their own mode.
+
 A new server starts in **fragment** mode (a server from before modes existed keeps filing everything). In any mode,
 **also file every incoming headline + summary as a fragment** (archive panel, `morgue fragments on|off`; on by default)
 gives each live-feed article a morgue no. as it arrives — a record of good headlines and summaries even when the text

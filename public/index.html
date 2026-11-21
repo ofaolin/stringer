@@ -164,6 +164,16 @@
           <label><input type="radio" name="type" value="new" checked />NEW MEDIA</label>
         </div>
       </div>
+      <div class="field">
+        <span>morgue <span class="dim">— what gets filed for this outlet</span></span>
+        <div class="bias-pick morgue-pick" id="f-morgue">
+          <label title="follow the server's morgue mode"><input type="radio" name="morgueMode" value="" checked /><span id="f-morgue-default">DEFAULT</span></label>
+          <label title="every article from this outlet's feed is filed"><input type="radio" name="morgueMode" value="auto" />AUTO</label>
+          <label title="articles opened in the reader or saved to a binder"><input type="radio" name="morgueMode" value="adhoc" />AD-HOC</label>
+          <label title="only binder saves and right-click → File in the morgue"><input type="radio" name="morgueMode" value="manual" />MANUAL</label>
+          <label title="like manual, but headline + summary only — no pages fetched"><input type="radio" name="morgueMode" value="fragment" />FRAGMENT</label>
+        </div>
+      </div>
       <div class="field edit-only" id="f-edit-extra">
         <span>danger zone</span>
         <div class="row">
