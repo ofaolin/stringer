@@ -1307,6 +1307,23 @@ function colsToggle(lists, open, what, isNew = null, isHit = null) {
 }
 
 // ── the reader's DETAILS pane: everything about one article, and the stories it belongs to ──
+// Remove from the morgue / Delete article (archive.manage) — from the right-click menu and the DETAILS tab
+async function removeArticle(a, mode) {
+  if (!auth.can('archive.manage')) return false;
+  const title = (a.title || a.link || '').slice(0, 90);
+  const ask = mode === 'delete'
+    ? `Delete this article from the archive and the morgue?\n\n“${title}”\n\nIt won't come back from its feed.`
+    : `Remove this article from the morgue?\n\n“${title}”\n\nIts morgue copy and number go; the headline stays in the archive, and it won't be re-filed automatically (saving it to a binder or "File in the morgue" files it again).`;
+  if (!confirm(ask)) return false;
+  try {
+    const r = await api('morgue/remove', { method: 'POST', body: { link: a.link, mode } });
+    for (const x of state.items.flatMap((it) => it.articles || [it])) if (x.link === a.link && state.fulltext?.[x.id]) delete state.fulltext[x.id];
+    log(`${mode === 'delete' ? '✕ deleted' : '▣ removed from the morgue'}: ${esc(title)}${r.morgue ? ` <span class="dim">· morgue no. ${esc(r.morgue)} retired</span>` : ''}${r.cited ? ` <span class="warn">· ${r.cited} binder entr${r.cited === 1 ? 'y still cites' : 'ies still cite'} that number</span>` : ''}`, 'ok');
+    activity.record('archive', `${mode === 'delete' ? 'deleted' : 'removed from the morgue'}: ${a.title || a.link}`);
+    loadNews();
+    return true;
+  } catch (e) { log(`couldn't ${mode === 'delete' ? 'delete it' : 'remove it'}: ${esc(e.data?.error || e.message)}`, 'err'); return false; }
+}
 const ORIGIN_NAME = { live: 'live feed', wayback: 'Wayback Machine feed snapshot', sitemap: 'outlet sitemap', hn: 'Hacker News' };
 async function mountDetails(slotId, a) {
   const slot = document.getElementById(slotId);
@@ -1344,6 +1361,7 @@ function renderDetails(slot) {
         ${row('words', `${(b.words || 0).toLocaleString()}${b.status === 'partial' ? ' <span class="warn">· fragment</span>' : ''}`)}
         ${b.fetched ? row('filed', esc(isoDay(b.fetched))) : ''}${row('filed by', b.filedBy ? esc(b.filedBy) : '<span class="dim">not recorded (filed before STRINGER tracked it)</span>')}`
         : `<div class="dim small">${b ? 'couldn\'t be filed — the site refused or the page is gone' : 'not in the morgue yet'}</div>`}
+      ${auth.can('archive.manage') && d.archived ? `<div class="dt-acts small">${b?.morgue ? '<button type="button" class="link" data-act="dt-unfile" title="drop its morgue copy and retire the morgue no. — the headline stays; it won\'t be re-filed automatically">[remove from the morgue]</button> ' : ''}<button type="button" class="link err" data-act="dt-delete" title="delete it from the archive and the morgue — it won\'t come back from its feed">[delete article]</button></div>` : ''}
     </div>
     <div class="dt-sec"><h4>STORIES <span class="dim">· ${stories.length}</span></h4>
       <div class="dim small dt-note">An article belongs to one story at a time. As coverage regroups it can move; the stories it was part of before are kept here.</div>
@@ -1366,6 +1384,15 @@ document.addEventListener('click', (e) => {
     const link = slot?._data?.d?.link;
     if (slot.closest('#dlg-reader')?.open) slot.closest('#dlg-reader').close();      // get the reader out of the way
     openStoryBySid(b.dataset.sid, link);
+  }
+  const rm = e.target.closest('.info-slot [data-act=dt-unfile], .info-slot [data-act=dt-delete]');
+  if (rm) {
+    const slot = rm.closest('.info-slot'), { a, d } = slot._data || {};
+    removeArticle({ ...a, link: d?.link || a?.link }, rm.dataset.act === 'dt-delete' ? 'delete' : 'unfile').then((ok) => {
+      if (!ok) return;
+      if (rm.dataset.act === 'dt-delete' && slot.closest('#dlg-reader')?.open) slot.closest('#dlg-reader').close();
+      else { delete mountDetails.kept?.[slot.id]; slot.dataset.key = ''; mountDetails(slot.id, a); }
+    });
   }
   const t = e.target.closest('.info-slot [data-act=toggle-read]');
   if (t) { const slot = t.closest('.info-slot'); const { a } = slot._data; setRead(a, !isReadA(a)).then(() => renderDetails(slot)); }
@@ -2836,7 +2863,7 @@ function contextAt(node) {
 }
 const research = createResearch({ api, esc, chip, srcById, log: (m, c) => log(m, c), auth, store, fmtTime, agoText: (t) => agoText(t),
   openStoryBySid, reader, queryError, setQuery: (q) => { state.tabId = null; return setQuery(q); }, mainQuery: () => qInput.value,
-  attachAutocomplete, suggest, acCtx, asArticle, contextAt, highlight: highlightHTML, articleTip: (a, o) => articleTip(a, o), onMorgue: (l, no) => noteMorgue(l, no), morgueOf: (a) => (a?.id != null && state.fulltext?.[a.id]?.morgue) || a?.morgue || null, activity: (k, x, r) => activity.record(k, x, r), onQueryEdit: (q) => mirrorQuery('builder', q) });
+  attachAutocomplete, suggest, acCtx, asArticle, contextAt, highlight: highlightHTML, articleTip: (a, o) => articleTip(a, o), onMorgue: (l, no) => noteMorgue(l, no), morgueOf: (a) => (a?.id != null && state.fulltext?.[a.id]?.morgue) || a?.morgue || null, removeArticle: (a, mode) => removeArticle(a, mode), activity: (k, x, r) => activity.record(k, x, r), onQueryEdit: (q) => mirrorQuery('builder', q) });
 queryMirrors.builder = research.builder.setText;
 $('#q-binder')?.addEventListener('click', () => research.open());
 // b: the binder · q: the query builder (anywhere, popovers included; not while typing)

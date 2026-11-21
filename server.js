@@ -122,7 +122,7 @@ async function refreshOne(s) {
   try {
     const feed = await fetchFeed(s.feed);
     const now = Date.now();
-    const items = feed.items.slice(0, 60).map((it) => (GNEWS.test(it.link) ? { ...it, title: stripOutletSuffix(it.title, s.name) } : it)).filter((it) => it.title && !(GNEWS.test(it.link) && /^[\w.-]+\.(txt|html?|php|xml|json)$/i.test(it.title))).map((it) => {
+    const items = feed.items.slice(0, 60).map((it) => (GNEWS.test(it.link) ? { ...it, title: stripOutletSuffix(it.title, s.name) } : it)).filter((it) => it.title && !(GNEWS.test(it.link) && /^[\w.-]+\.(txt|html?|php|xml|json)$/i.test(it.title)) && archive?.tombstone(it.link) !== 'deleted').map((it) => {
       let date = it.date;
       if (!date) {
         if (!firstSeen.has(it.link)) firstSeen.set(it.link, now);
@@ -156,6 +156,12 @@ function hold(sourceId, items, fresh = false) {
     const k = normalizeUrl(it.link);
     if (fresh || !m.has(k)) m.set(k, fresh && m.has(k) ? { ...it, date: Math.min(it.date, m.get(k).date) } : it);
   }
+}
+// an article deleted by hand leaves the live window now (and the stories it was in, at the next grouping)
+function dropHeld(link) {
+  const k = normalizeUrl(link);
+  for (const m of held.values()) m.delete(k);
+  for (const [sid, c] of cache) if (c.items?.some((it) => normalizeUrl(it.link) === k)) cache.set(sid, { ...c, items: c.items.filter((it) => normalizeUrl(it.link) !== k) });
 }
 function pruneHeld() {
   const cutoff = Date.now() - LIVE_DAYS * 864e5;
@@ -583,6 +589,8 @@ function withFilers(ft) {
 }
 function resolveArticle(link, by = null) {
   const n = normalizeUrl(link);
+  if (archive?.tombstone(link) === 'deleted') return null;                    // deleted from the archive by hand
+  if (archive && by) archive.clearTombstone(link, 'nofile');                   // filing it on purpose re-files a removed one
   const live = collectArticles({ hours: LIVE_DAYS * 24 }).find((a) => normOf(a) === n);
   if (!archive) return live ? { ...live, morgue: null } : null;
   let row = archive.articleRow(link);
@@ -1389,6 +1397,9 @@ async function handleApi(req, res, url) {
       // Wayback copy whenever the original can't be read; live ones only when the page is gone
       const archived = !!row && (row.published < Date.now() - LIVE_DAYS * 864e5 || row.origin !== 'live');
       let r = await readArticle(link, { wayback: true, anyFailure: archived, date: row?.published ?? (Number(url.searchParams.get('date')) || null) });
+      // removed from the morgue (or deleted) by hand: shown, not filed again
+      const tomb = archive?.tombstone(link);
+      if (tomb) return send(res, 200, finish({ ...r, notFiled: tomb === 'deleted' ? 'deleted' : 'removed' }));
       // manual / fragment mode: reading doesn't file it (binder saves and "File in the morgue" do)
       const mm = modeFor(id != null ? archive.st.byId.get(id)?.source_id : null);       // (the outlet's own mode, if it has one)
       if ((mm === 'manual' || mm === 'fragment') && !stored?.morgue) {
@@ -1517,6 +1528,27 @@ async function handleApi(req, res, url) {
   }
 
   // ── read / unread ── (POST { link | links[], read: true|false }) — your own, signed in
+  // ── Remove from the morgue / Delete article (archive.manage): POST { link, mode: 'unfile' | 'delete' } ──
+  if (parts[0] === 'morgue' && parts[1] === 'remove' && m === 'POST') {
+    need(ctx, 'archive.manage');
+    if (!archive) return send(res, 503, { error: 'the archive is unavailable' });
+    const b = await readBody(req);
+    const link = String(b.link || '');
+    const id = /^https?:\/\//.test(link) ? archive.articleId(link) : null;
+    if (id == null) return send(res, 404, { error: "that article isn't in the archive" });
+    const morgue = archive.morgueOf(id);
+    const cited = morgue ? accounts.db.prepare('SELECT COUNT(*) n FROM binder WHERE morgue = ?').get(morgue).n : 0;
+    if (b.mode === 'delete') {
+      archive.deleteArticle(id);
+      dropHeld(link);
+      console.log(`[morgue] ${ctx.user.username} deleted ${link}${morgue ? ` (morgue no. ${morgue})` : ''}`);
+      return send(res, 200, { ok: true, deleted: true, morgue, cited });
+    }
+    archive.unfile(id);
+    console.log(`[morgue] ${ctx.user.username} removed ${link} from the morgue${morgue ? ` (morgue no. ${morgue})` : ''}`);
+    return send(res, 200, { ok: true, removed: true, morgue, cited });
+  }
+
   // ── File in the morgue (right-click): files an article now and fetches its text (fragment mode: headline + summary) ──
   if (parts[0] === 'morgue' && parts[1] === 'file' && m === 'POST') {
     if (!ctx.user) return send(res, 401, { error: 'sign in to file articles in the morgue' });

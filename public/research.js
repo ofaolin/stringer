@@ -531,6 +531,11 @@ export function createResearch(ctx) {
       if (a && !where.inReader) entries.push({ icon: '▸', label: 'Open in reader', run: () => ctx.reader.open(ctx.asArticle(a)) });
       // not (known to be) in the morgue: file it now — in any mode (manual / fragment mode: the way to file by hand)
       if (a && !where.entry && signedIn() && auth.can('reader.fetch') && !ctx.morgueOf?.(a)) entries.push({ icon: '▣', label: 'File in the morgue', hint: 'morgue no.', run: () => fileInMorgue(a) });
+      // archive.manage: take it out (remove the morgue copy, or delete the article)
+      if (a && !where.entry && auth.can('archive.manage')) {
+        if (ctx.morgueOf?.(a)) entries.push({ icon: '▣', label: 'Remove from the morgue', cls: 'err', run: () => ctx.removeArticle(a, 'unfile') });
+        entries.push({ icon: '✕', label: 'Delete article', hint: 'archive + morgue', cls: 'err', run: () => ctx.removeArticle(a, 'delete') });
+      }
       if (a) entries.push({ icon: '⧉', label: 'Copy link', run: () => copy(a.link, 'the link') });
       if (st?.sid) entries.push({ icon: '＋', label: `Add <b>story:${esc(st.sid)}</b> to query`, run: () => builder.add(`story:${st.sid}`) });
     }
