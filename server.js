@@ -6,12 +6,13 @@ import { fileURLToPath } from 'node:url';
 import { fetchFeed, discoverFeed } from './lib/feeds.js';
 import { DEFAULT_SOURCES } from './lib/default-sources.js';
 import { clusterArticles, storiesFromClusters, sourceWeight, tokenize } from './lib/cluster.js';
+import { ClusterWorker } from './lib/cluster-worker.js';
 import { Accounts, PERMISSIONS } from './lib/accounts.js';
 import * as oidc from './lib/oidc.js';
 import { StoryRegistry } from './lib/stories.js';
 import fsSync from 'node:fs';
 import zlib from 'node:zlib';
-import { parseQuery, expandText, evaluate, matchLeaf, scopeOf, QueryError } from './public/query.js';
+import { parseQuery, expandText, evaluate, matchLeaf, scopeOf, QueryError, REGEX_MODE } from './public/query.js';
 import { topicOf, topicOfMany } from './public/topics.js';
 import { Archive, BODY, normalizeUrl } from './lib/archive.js';
 import { BackfillWorker } from './lib/backfill-worker.js';
@@ -126,7 +127,7 @@ async function refreshOne(s) {
     hold(s.id, items, true);
     try {
       archive?.insertMany(items.map((it) => ({ ...it, quality: 2, origin: 'live' })));
-      harvest?.queue(items.map((it) => ({ link: it.link, sourceId: s.id })));     // fetch full text in the background
+      harvest?.queue(items.map((it) => ({ link: it.link, sourceId: s.id, site: s.name })));     // file / fetch in the background (see the morgue's mode)
     } catch (e) { console.error('[archive] insert failed', e.message); }
   } catch (e) {
     const prev = cache.get(s.id);
@@ -184,11 +185,14 @@ function refreshAll() {
     .then(() => {
       pruneHeld();
       lastRefresh = Date.now();
-      // group the new window now (~1s for two weeks of articles) rather than on the next visitor's request
-      // (before the sync counts as done, so the status line can report the regroup with it)
-      try { cachedStories(collectArticles({ hours: LIVE_DAYS * 24 }), rankedSources('community').sMap, { hours: LIVE_DAYS * 24, sourceId: null, minSources: 3 }); } catch (e) { console.error('[stories] regroup failed', e.message); }
+      // group the new window now, in the worker, rather than on the next visitor's request (before the sync counts as
+      // done, so the status line can report the regroup with it; visitors meanwhile get the previous grouping)
+      const H = LIVE_DAYS * 24;
+      return regroupInWorker({ hours: H, sourceId: null, articles: collectArticles({ hours: H }) }).then(() => {
+      try { cachedStories(collectArticles({ hours: H }), rankedSources('community').sMap, { hours: H, sourceId: null, minSources: 3 }); } catch (e) { console.error('[stories] regroup failed', e.message); }
       const ok = db.sources.filter((s) => s.enabled && !cache.get(s.id)?.error).length;
       console.log(`[sync] ${ok}/${db.sources.filter((s) => s.enabled).length} feeds ok in ${Date.now() - t0}ms`);
+      });
     })
     .finally(() => { refreshing = null; });
   return refreshing;
@@ -307,7 +311,7 @@ function binderSetsOf(uid) {
   const hit = binderSetCache.get(uid);
   if (hit) return hit;
   const links = new Set(), sids = new Set();
-  for (const e of accounts.binder(uid)) { if (e.kind === 'story') sids.add(e.sid); else links.add(e.target); }
+  for (const e of accounts.binder(uid)) { if (e.sid) sids.add(e.sid); else if (e.link) links.add(e.target); }
   const sets = { links, sids };
   binderSetCache.set(uid, sets);
   return sets;
@@ -389,35 +393,67 @@ const singleStory = (a, sMap) => {
   return { sourceCount: 1, articles: [a], dist, blindspot: null };
 };
 
-// grouping is the expensive step (~100ms); reuse it until feeds, sources or votes change
-let storyCache = { key: null, stories: null };
-// Grouping (~1s) is cached until the feeds or the outlet list change; scoring by a set of ranking weights is cheap
-// and cached per weight set (community + each recently active personal ranking).
+// Grouping articles into stories is the expensive step (seconds for two weeks of articles), so it runs in a worker
+// thread and is cached per view (time window + outlet filter) until the feeds or the outlet list change. While a new
+// grouping is computed, requests get the view's previous one (at most one sync old) instead of waiting; a view with
+// none yet is grouped in place. Scoring by a set of ranking weights is cheap and cached per grouping + weight set.
+const clusterer = new ClusterWorker({ log: (m) => console.log(m) });
+const groupings = new Map();              // view → { key, clusters, at, titled, pending: key | null }
 const scoredCache = new Map();
 let lastGrouping = null;                  // the last full-window regroup (for the status line)
+const groupingSig = () => db.sources.map((s) => `${s.id}:${s.enabled ? 1 : 0}:${s.bias}`).join(',');
+const groupingKey = ({ hours, sourceId, articles }) => `${lastRefresh}|${hours}|${sourceId}|${articles.length}|${groupingSig()}`;
+function installGrouping(view, key, clusters, { hours, sourceId, articles, ms, where }) {
+  const full = !sourceId && hours === LIVE_DAYS * 24;
+  // lasting story numbers (only the full window rewrites the registry; partial views just look them up)
+  try { storyReg.assign(clusters, normOf, { write: full }); } catch (e) { console.error('[stories] numbering failed', e.message); }
+  const prev = groupings.get(view);
+  const still = prev?.pending && prev.pending !== key;                 // a newer one still being computed
+  groupings.set(view, { key, clusters, at: Date.now(), titled: null, pending: still ? prev.pending : null, pendingPromise: still ? prev.pendingPromise : null });
+  if (groupings.size > 8) for (const k of groupings.keys()) { if (k !== view && groupings.size > 8) groupings.delete(k); }
+  if (full) lastGrouping = { at: Date.now(), ms, articles: articles.length, stories: clusters.length };
+  if (ms > 300) console.log(`[stories] regrouped ${articles.length} articles in ${ms}ms${where} (${key.split('|').slice(0, 4).join('|')})`);
+}
+const bodyOfLive = (a) => liveBodies.get(normOf(a))?.text;
+// (a grouping finished in the worker is installed unless one for a later sync got there first)
+const newerThan = (key, cur) => !cur || (key !== cur && Number(key.split('|')[0]) >= Number(cur.split('|')[0]));
+// group a view in the worker (the main thread stays free); resolves once it's installed
+function regroupInWorker({ hours, sourceId, articles }) {
+  const view = `${hours}|${sourceId}`, key = groupingKey({ hours, sourceId, articles });
+  const g = groupings.get(view);
+  if (g?.key === key) return Promise.resolve();
+  if (g?.pendingPromise && g.pending === key) return g.pendingPromise;
+  syncLiveBodies();
+  const t0 = Date.now();
+  const promise = clusterer.cluster(articles, bodyOfLive)
+    .then((clusters) => { if (newerThan(key, groupings.get(view)?.key)) installGrouping(view, key, clusters, { hours, sourceId, articles, ms: Date.now() - t0, where: ' (worker)' }); })
+    .catch((e) => console.error('[stories] grouping in the worker failed:', e.message))
+    .finally(() => { const cur = groupings.get(view); if (cur?.pending === key) { cur.pending = null; cur.pendingPromise = null; } });
+  if (g) { g.pending = key; g.pendingPromise = promise; }
+  else groupings.set(view, { key: null, clusters: null, pending: key, pendingPromise: promise });
+  return promise;
+}
 function cachedStories(articles, sMap, { hours, sourceId, minSources }) {
-  const sig = db.sources.map((s) => `${s.id}:${s.enabled ? 1 : 0}:${s.bias}`).join(',');
-  const key = `${lastRefresh}|${hours}|${sourceId}|${articles.length}|${sig}`;
-  if (storyCache.key !== key) {
-    const t0 = Date.now();
-    syncLiveBodies();
-    // morgue text (where we have it) confirms or vetoes articles belonging together
-    storyCache = { key, clusters: clusterArticles(articles, { bodyOf: (a) => liveBodies.get(normOf(a))?.text }) };
-    // lasting story numbers (only the full window rewrites the registry; partial views just look them up)
-    try { storyReg.assign(storyCache.clusters, normOf, { write: !sourceId && hours === LIVE_DAYS * 24 }); } catch (e) { console.error('[stories] numbering failed', e.message); }
-    scoredCache.clear();
-    const ms = Date.now() - t0;
-    if (!sourceId && hours === LIVE_DAYS * 24) lastGrouping = { at: Date.now(), ms, articles: articles.length, stories: storyCache.clusters.length };
-    if (ms > 300) console.log(`[stories] regrouped ${articles.length} articles in ${ms}ms (${key.split('|').slice(0, 4).join('|')})`);
+  const view = `${hours}|${sourceId}`, key = groupingKey({ hours, sourceId, articles });
+  let g = groupings.get(view);
+  if (g?.key !== key) {
+    if (g?.clusters) regroupInWorker({ hours, sourceId, articles });   // serve the previous grouping meanwhile
+    else {
+      // nothing to serve yet: group here (the first request for a view; small views are quick)
+      syncLiveBodies();
+      const t0 = Date.now();
+      installGrouping(view, key, clusterArticles(articles, { bodyOf: bodyOfLive }), { hours, sourceId, articles, ms: Date.now() - t0, where: '' });
+    }
+    g = groupings.get(view);
   }
-  const wkey = `${minSources}|${[...sMap.values()].map((s) => s.votes || 0).join(',')}`;
+  const wkey = `${view}|${g.key}|${minSources}|${[...sMap.values()].map((s) => s.votes || 0).join(',')}`;
   let stories = scoredCache.get(wkey);
   if (!stories) {
-    stories = storiesFromClusters(storyCache.clusters, sMap, { minSources });
+    stories = storiesFromClusters(g.clusters, sMap, { minSources });
     scoredCache.set(wkey, stories);
     // remember each story's lead headline (once per regroup, from the first scoring of the full window)
-    if (!sourceId && hours === LIVE_DAYS * 24 && storyCache.titled !== storyCache.key) {
-      storyCache.titled = storyCache.key;
+    if (!sourceId && hours === LIVE_DAYS * 24 && g.titled !== g.key) {
+      g.titled = g.key;
       try { storyReg.setTitles(stories); } catch (e) { console.error('[stories] titles failed', e.message); }
     }
     if (scoredCache.size > 16) scoredCache.delete(scoredCache.keys().next().value);
@@ -442,7 +478,51 @@ function liveStoryIndex(ctx) {
 }
 // an article the server knows (live feeds or archive), with a morgue no. — filed as a fragment when it has no text.
 // Only server-known articles: a client can't add arbitrary rows to the shared archive.
-function resolveArticle(link) {
+// ── the morgue's mode ── auto: every live-feed article is filed · ad-hoc: what's opened in the reader or saved to a
+// binder · manual: only what's saved to a binder or filed by hand (right-click → File in the morgue) · fragment: like
+// manual, but filed as fragments — headline and summary, no page is fetched. Chosen in the archive panel (or the
+// setup wizard). A new server starts in fragment mode; one from before modes existed keeps filing everything (auto),
+// or ad-hoc if it was paused. FULLTEXT sets the starting mode (0 = ad-hoc) until one is chosen.
+const MORGUE_MODES = ['auto', 'adhoc', 'manual', 'fragment'];
+function morgueMode() {
+  const saved = archive?.kv('morgueMode');
+  if (MORGUE_MODES.includes(saved)) return saved;
+  const env = String(process.env.FULLTEXT ?? '').toLowerCase();
+  if (MORGUE_MODES.includes(env)) return env;
+  if (env === '0' || env === 'off') return 'adhoc';
+  if (archive?.kv('fulltextEnabled') === false) return 'adhoc';          // (paused, before modes existed)
+  return accounts.settings().setupDone ? 'auto' : 'fragment';
+}
+// in any mode: every incoming headline + summary is filed as a fragment (on unless turned off)
+const fragmentAll = () => archive?.kv('fragmentAll') !== false;
+function setFragmentAll(on) { archive.kv('fragmentAll', !!on); harvest?.setFragmentAll(!!on); }
+function setMorgueMode(mode) {
+  if (!MORGUE_MODES.includes(mode)) throw new Error('mode must be auto, adhoc, manual or fragment');
+  archive.kv('morgueMode', mode);
+  harvest?.setMode(mode);
+}
+// who filed a morgue copy, for display: a user's name, the auto-filer, a visitor — or null (before this was recorded)
+function filerName(fb) {
+  if (!fb) return null;
+  if (fb === 'harvester') return 'auto-filer';
+  if (fb === 'wayback') return 'auto-filer (Wayback copy)';
+  if (fb === 'guest') return 'a visitor';
+  const u = /^user:(\d+)$/.test(fb) ? accounts.user(Number(fb.slice(5))) : null;
+  return u ? u.display || u.username : 'a former user';
+}
+// the morgue's "filed by" counts, named: [{ name, n, auto }] (most first) — raw keys never leave the server
+function withFilers(ft) {
+  const raw = ft.filedBy || {};
+  const merged = new Map();
+  for (const [k, n] of Object.entries(raw)) {
+    const name = k ? filerName(k) : 'before tracking';
+    const e = merged.get(name) || { name, n: 0, auto: k === 'harvester' || k === 'wayback', untracked: !k };
+    e.n += n; merged.set(name, e);
+  }
+  const { filedBy, ...rest } = ft;
+  return { ...rest, filers: [...merged.values()].sort((a, b) => b.n - a.n) };
+}
+function resolveArticle(link, by = null) {
   const n = normalizeUrl(link);
   const live = collectArticles({ hours: LIVE_DAYS * 24 }).find((a) => normOf(a) === n);
   if (!archive) return live ? { ...live, morgue: null } : null;
@@ -451,7 +531,9 @@ function resolveArticle(link) {
   if (!row) return null;
   const a = live || Archive.toArticle(archive.st.byId.get(row.id));
   const site = db.sources.find((s) => s.id === a.sourceId)?.name || '';
-  const morgue = archive.fileFragment(row.id, { title: a.title, summary: a.summary || '', link: a.link, site });
+  const morgue = archive.fileFragment(row.id, { title: a.title, summary: a.summary || '', link: a.link, site }, by);
+  // filed without its text yet (a fragment): fetch it now — except in fragment mode, which files headline + summary only
+  if (archive.bodyState(row.id)?.status === 'fragment' && morgueMode() !== 'fragment') harvest?.file([{ link: a.link, sourceId: a.sourceId }]);
   return { link: a.link, title: a.title, sourceId: a.sourceId, date: a.date, summary: a.summary || '', morgue };
 }
 function planBases(plans, ids) {
@@ -695,7 +777,8 @@ function bodyRegexes(ast, neg = false, out = []) {
   const esc = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const W = '[\\p{L}\\p{N}]';
   try {
-    if (ast.kind === 'regex') out.push(new RegExp(ast.re.source, [...new Set(ast.re.flags + 'i')].filter((f) => f !== 'g' && f !== 'y').join('')));
+    // a regex term is already compiled for the linear-time engine (lowercase pattern): used as is (see snippet)
+    if (ast.kind === 'regex') out.push(ast.re);
     else if (ast.kind === 'word') out.push(new RegExp(`(?<!${W})${esc(ast.value)}${W}*`, 'iu'));
     else if (ast.kind === 'phrase') out.push(new RegExp(`(?<!${W})${esc(ast.value).replace(/ /g, '\\s+')}(?!${W})`, 'iu'));
     else if (ast.kind === 'wild') out.push(new RegExp(`(?<!${W})${ast.value.split('*').map((p) => p.split('?').map(esc).join(`${W}`)).join(`${W}*`)}${W}*`, 'iu'));
@@ -704,8 +787,15 @@ function bodyRegexes(ast, neg = false, out = []) {
 }
 
 function snippet(text, res, before = 110, after = 190) {
+  // linear-engine regexes ('l') have no case-insensitive mode: they match the lowercased text. Lowercasing almost
+  // never changes a string's length; when it does, the excerpt is taken from the lowercased text so positions agree.
+  if (res.some((r) => r.flags.includes('l'))) {
+    const low = text.toLowerCase();
+    if (low.length !== text.length) text = low;
+    var lowText = low;   // eslint-disable-line no-var
+  }
   let m = null;
-  for (const r of res) { const x = r.exec(text); if (x && x[0] && (!m || x.index < m.index)) m = x; }
+  for (const r of res) { const x = r.exec(r.flags.includes('l') ? lowText : text); if (x && x[0] && (!m || x.index < m.index)) m = x; }
   if (!m) return null;
   let s = Math.max(0, m.index - before), e = Math.min(text.length, m.index + m[0].length + after);
   if (s > 0) s = text.indexOf(' ', s) + 1 || s;
@@ -753,6 +843,7 @@ function cleanSaved(b, prev = {}) {
   }
   if (b.name !== undefined || !prev.id) out.name = String(b.name ?? '').trim().slice(0, 60) || (out.query || prev.query).slice(0, 40);
   if (b.pinned !== undefined || !prev.id) out.pinned = b.pinned === undefined ? true : !!b.pinned;
+  if (b.highlight !== undefined || !prev.id) out.highlight = b.highlight !== false;
   if (b.view !== undefined) {
     const v = b.view;
     out.view = v && VIEW_MODES.includes(v.mode) && VIEW_SORTS.includes(v.sort) ? { mode: v.mode, sort: v.sort } : null;   // time window is part of the query
@@ -848,6 +939,54 @@ const clearSessionCookie = (req, res) => res.setHeader('Set-Cookie', `${COOKIE}=
 const baseUrl = (req) => accounts.settings().baseUrl || `${isHttps(req) ? 'https' : 'http'}://${req.headers['x-forwarded-host'] || req.headers.host}`;
 
 // who is asking, what they may do, and which ranking weights apply
+// ── throttling: failed sign-ins (and other guessable things) back off ──
+// Keyed by client address and by username. An address gets 5 free failures, then waits 1s, 2s, 4s… up to 15 minutes;
+// a username (failures from anywhere) gets 10, then waits up to a minute — enough to stop guessing, too little to
+// lock its owner out. The address is the connection's own (X-Forwarded-For isn't trusted: behind a reverse proxy
+// every visitor shares the proxy's address, so the per-username limit is what remains).
+const attempts = new Map();
+const LIMITS = { ip: { free: 5, max: 15 * 60e3 }, user: { free: 10, max: 60e3 }, setup: { free: 5, max: 15 * 60e3 }, signup: { free: 5, max: 60 * 60e3 } };
+const clientAddr = (req) => String(req.socket?.remoteAddress || 'unknown').replace(/^::ffff:/, '');
+function throttled(keys) {
+  const now = Date.now();
+  let wait = 0;
+  for (const k of keys) { const a = attempts.get(k); if (a && a.until > now) wait = Math.max(wait, a.until - now); }
+  return Math.ceil(wait / 1000);
+}
+function throttleFail(keys) {
+  const now = Date.now();
+  if (attempts.size > 20000) for (const [k, a] of attempts) if (now - a.at > 3600e3) attempts.delete(k);
+  for (const k of keys) {
+    const lim = LIMITS[k.split(':')[0]] || LIMITS.ip;
+    let a = attempts.get(k);
+    if (!a || now - a.at > 3600e3) a = { n: 0, until: 0 };          // an hour of quiet resets the count
+    a.n++; a.at = now;
+    a.until = a.n > lim.free ? now + Math.min(lim.max, 1000 * 2 ** (a.n - lim.free - 1)) : 0;
+    attempts.set(k, a);
+  }
+}
+const throttleClear = (keys) => { for (const k of keys) attempts.delete(k); };
+function tooMany(res, secs) {
+  res.setHeader('Retry-After', String(secs));
+  return send(res, 429, { error: `too many failed attempts — try again in ${secs < 90 ? `${secs} second${secs === 1 ? '' : 's'}` : `${Math.ceil(secs / 60)} minutes`}` });
+}
+
+// ── the one-time setup code (only while the server isn't set up) ──
+let setupToken = null;
+const SETUP_FILE = () => path.join(DATA_DIR, 'setup-token.txt');
+function issueSetupToken() {
+  if (accounts.settings().setupDone) return clearSetupToken();
+  setupToken = String(process.env.STRINGER_SETUP_TOKEN || crypto.randomBytes(9).toString('base64url')).trim();
+  try { fsSync.writeFileSync(SETUP_FILE(), setupToken + '\n', { mode: 0o600 }); } catch (e) { console.error('[setup] could not write', SETUP_FILE(), e.message); }
+  console.log(`\n  ┌─ this server isn't set up yet ─────────────────────────\n  │ open it in a browser and enter the setup code:  ${setupToken}\n  │ (also in ${SETUP_FILE()})\n  └────────────────────────────────────────────────────────\n`);
+}
+function clearSetupToken() { setupToken = null; try { fsSync.unlinkSync(SETUP_FILE()); } catch { /* not there */ } }
+function setupTokenOk(t) {
+  if (!setupToken || typeof t !== 'string') return false;
+  const a = Buffer.from(t.trim()), b = Buffer.from(setupToken);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 function requestCtx(req, url) {
   const user = accounts.sessionUser(cookieOf(req, COOKIE));
   const perms = accounts.rolePerms(user ? user.role : 'guest');
@@ -883,6 +1022,12 @@ const roleFromClaims = (cfg, claims) => {
   return null;
 };
 
+// Where to send the browser after sign-in: a path on this site, never another one. Parsed like a browser would
+// (so "/\\evil.example" and "//evil.example" resolve to another host and are refused); only path + query + hash kept.
+function sameOriginPath(v) {
+  const base = 'http://stringer.invalid';
+  try { const u = new URL(String(v || '/'), base); return u.origin === base ? (u.pathname + u.search + u.hash) || '/' : '/'; } catch { return '/'; }
+}
 // GET /auth/oidc/login → provider → GET /auth/oidc/callback
 async function handleOidc(req, res, url) {
   const st = accounts.settings();
@@ -893,8 +1038,7 @@ async function handleOidc(req, res, url) {
   try {
     if (url.pathname === '/auth/oidc/login') {
       const { url: go, state, verifier, nonce } = await oidc.authorizeUrl(cfg, redirectUri);
-      const back = url.searchParams.get('return') || '/';
-      accounts.putOidcState(state, verifier, nonce, back.startsWith('/') && !back.startsWith('//') ? back : '/');
+      accounts.putOidcState(state, verifier, nonce, sameOriginPath(url.searchParams.get('return')));
       res.writeHead(302, { Location: go });
       return res.end();
     }
@@ -908,12 +1052,13 @@ async function handleOidc(req, res, url) {
       const mapped = roleFromClaims(cfg, claims);
       if (!user && claims.email && claims.email_verified === true) {
         // an existing account with the same verified email (e.g. the admin created at setup) is linked once
-        const byEmail = accounts.db.prepare('SELECT * FROM users WHERE lower(email) = lower(?) AND oidc IS NULL').get(claims.email);
+        // …but only one whose email is verified: a self-sign-up could otherwise claim someone's address first
+        const byEmail = accounts.db.prepare('SELECT * FROM users WHERE lower(email) = lower(?) AND oidc IS NULL AND email_verified = 1').get(claims.email);
         if (byEmail) { accounts.db.prepare('UPDATE users SET oidc = ? WHERE id = ?').run(key, byEmail.id); user = accounts.user(byEmail.id); }
       }
       if (!user) {
         if (!cfg.autoCreate) return fail('there is no account for you on this server — ask an admin to create one');
-        user = accounts.createUser({ username: newOidcUsername(claims), display: claims.name || claims.preferred_username, email: claims.email || null,
+        user = accounts.createUser({ username: newOidcUsername(claims), display: claims.name || claims.preferred_username, email: claims.email || null, emailVerified: claims.email_verified === true,
           role: mapped || cfg.defaultRole || st.defaultRole, oidc: key });
         seedTabs(user.id);
         console.log(`[auth] new account via SSO: ${user.username} (${user.role})`);
@@ -936,7 +1081,8 @@ async function handleApi(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // drop 'api'
   const m = req.method;
   // writes must come from our own page (a cross-site form can't set this header)
-  if (m !== 'GET' && req.headers['x-requested-with'] !== 'stringer') return send(res, 403, { error: 'missing X-Requested-With header' });
+  // (/api/read too, though a GET: it fetches pages and marks them read — a cross-site link mustn't trigger it)
+  if ((m !== 'GET' || parts[0] === 'read') && req.headers['x-requested-with'] !== 'stringer') return send(res, 403, { error: 'missing X-Requested-With header' });
   if (parts[0] === 'health') return send(res, 200, { ok: true, articles: [...held.values()].reduce((n, x) => n + x.size, 0), lastRefresh });
   const ctx = requestCtx(req, url);
   const st = accounts.settings();
@@ -944,21 +1090,32 @@ async function handleApi(req, res, url) {
   if (parts[0] === 'me' && !parts[1] && m === 'GET') return send(res, 200, meView(ctx));
 
   // ── first run: create the admin, pick the outlets, archive settings ──
+  // Every write needs the one-time setup code from the server's log (or data/setup-token.txt): otherwise whoever
+  // reached a fresh server first would become its admin.
   if (parts[0] === 'setup') {
     if (st.setupDone) return send(res, 409, { error: 'this server is already set up' });
+    if (m === 'POST') {
+      const b = await readBody(req);
+      const sk = [`setup:${clientAddr(req)}`];
+      const wait = throttled(sk);
+      if (wait) return tooMany(res, wait);
+      if (!setupTokenOk(b.token)) { throttleFail(sk); return send(res, 403, { error: "that setup code isn't right — it's in the server's log (or data/setup-token.txt)", setupCode: true }); }
+      req.setupBody = b;
+      if (parts[1] === 'check') return send(res, 200, { ok: true });
+    }
     if (m === 'GET') {
       return send(res, 200, { sources: db.sources.map((s) => ({ id: s.id, name: s.name, bias: s.bias, type: s.type, site: s.site, enabled: s.enabled })),
         migrate: { tabs: (db.savedQueries || []).length, votes: db.sources.filter((s) => s.votes).length },
-        archive: archive ? { total: archive.approxTotal(), backfill: backfill?.status(), fulltext: archive.kv('fulltextEnabled') !== false } : null });
+        archive: archive ? { total: archive.approxTotal(), backfill: backfill?.status(), morgueMode: morgueMode(), fragmentAll: fragmentAll() } : null });
     }
     // find the feed of an outlet that isn't in the default list (only while the server is being set up)
     if (m === 'POST' && parts[1] === 'discover') {
-      const { url: u } = await readBody(req);
+      const { url: u } = req.setupBody;
       if (!u || typeof u !== 'string') return send(res, 400, { error: 'a site or feed URL is required' });
       try { return send(res, 200, await discoverFeed(u)); } catch (e) { return send(res, 422, { error: e.message }); }
     }
     if (m === 'POST' && !parts[1]) {
-      const b = await readBody(req);
+      const b = req.setupBody;
       const a = b.admin || {};
       const ids = new Set(Array.isArray(b.sources) ? b.sources : []);
       // outlets the admin added that aren't in the default list
@@ -993,9 +1150,13 @@ async function handleApi(req, res, url) {
         if (b.backfill?.enabled) backfill.start(b.backfill.since ? Date.parse(b.backfill.since) : undefined);
         else backfill.pause();
       }
-      if (harvest && archive) { if (b.fulltext === false) { harvest.pause(); archive.kv('fulltextEnabled', false); } else { harvest.start(); archive.kv('fulltextEnabled', true); } }
+      if (archive) {
+        try { setMorgueMode(MORGUE_MODES.includes(b.morgueMode) ? b.morgueMode : b.fulltext === false ? 'adhoc' : b.fulltext === true ? 'auto' : 'fragment'); } catch (e) { console.error('[setup] morgue mode', e.message); }
+        setFragmentAll(b.fragmentAll !== false);
+      }
       refreshAll();
       setSessionCookie(req, res, accounts.createSession(admin.id));
+      clearSetupToken();
       console.log(`[setup] done: admin ${admin.username}, ${ids.size} outlets${custom.length ? ` + ${custom.length} added` : ''}`);
       return send(res, 200, meView({ ...requestCtx({ headers: {} }, url), user: admin, perms: accounts.rolePerms('admin') }));
     }
@@ -1007,17 +1168,25 @@ async function handleApi(req, res, url) {
     if (parts[1] === 'login' && m === 'POST') {
       if (!st.localLogin) return send(res, 403, { error: 'password sign-in is turned off on this server' });
       const b = await readBody(req);
+      const keys = [`ip:${clientAddr(req)}`, `user:${String(b.username || '').trim().toLowerCase()}`];
+      const wait = throttled(keys);
+      if (wait) return tooMany(res, wait);
       try {
-        const u = accounts.login(b.username, b.password);
+        const u = await accounts.authenticate(b.username, b.password);
+        throttleClear(keys.slice(1));                   // the username's count only: one good account mustn't reset the address's
         setSessionCookie(req, res, accounts.createSession(u.id));
         return send(res, 200, meView({ ...ctx, ...requestCtxFor(u, url) }));
-      } catch (e) { await new Promise((r) => setTimeout(r, 400)); return send(res, 401, { error: e.message }); }
+      } catch (e) { throttleFail(keys); await new Promise((r) => setTimeout(r, 400)); return send(res, 401, { error: e.message }); }
     }
     if (parts[1] === 'signup' && m === 'POST') {
       if (!st.localLogin || !st.signup) return send(res, 403, { error: 'sign-ups are closed on this server' });
+      const sk = [`signup:${clientAddr(req)}`];
+      const wait = throttled(sk);
+      if (wait) return tooMany(res, wait);
+      throttleFail(sk);                                 // every sign-up from an address counts (5 free, then slower)
       const b = await readBody(req);
       try {
-        const u = accounts.createUser({ username: b.username, display: b.display, email: b.email || null, role: st.defaultRole, password: String(b.password || '') });
+        const u = accounts.createUser({ username: b.username, display: b.display, email: b.email || null, role: st.defaultRole, password: String(b.password || ''), emailVerified: false });
         seedTabs(u.id);
         setSessionCookie(req, res, accounts.createSession(u.id));
         return send(res, 201, meView({ ...ctx, ...requestCtxFor(u, url) }));
@@ -1042,8 +1211,14 @@ async function handleApi(req, res, url) {
   if (parts[0] === 'me' && parts[1] === 'password' && m === 'POST') {
     if (!ctx.user) return send(res, 401, { error: 'sign in first' });
     const b = await readBody(req);
-    if (ctx.user.pw) { try { accounts.login(ctx.user.username, b.current); } catch { return send(res, 400, { error: 'your current password is wrong' }); } }
-    try { accounts.updateUser(ctx.user.id, { password: String(b.password || '') }); } catch (e) { return send(res, 400, { error: e.message }); }
+    const keys = [`ip:${clientAddr(req)}`, `user:${ctx.user.username.toLowerCase()}`];
+    const wait = throttled(keys);
+    if (wait) return tooMany(res, wait);
+    if (ctx.user.pw) {
+      try { await accounts.authenticate(ctx.user.username, b.current); throttleClear(keys.slice(1)); }
+      catch { throttleFail(keys); return send(res, 400, { error: 'your current password is wrong' }); }
+    }
+    try { accounts.updateUser(ctx.user.id, { password: String(b.password || '') }, { keepSession: cookieOf(req, COOKIE) }); } catch (e) { return send(res, 400, { error: e.message }); }
     return send(res, 200, { ok: true });
   }
 
@@ -1060,7 +1235,7 @@ async function handleApi(req, res, url) {
       const uid = Number(parts[2]);
       if (m === 'PATCH') {
         const b = await readBody(req);
-        try { return send(res, 200, accounts.publicUser(accounts.updateUser(uid, b, { actorId: ctx.user.id }))); } catch (e) { return send(res, 400, { error: e.message }); }
+        try { return send(res, 200, accounts.publicUser(accounts.updateUser(uid, b, { actorId: ctx.user.id, keepSession: uid === ctx.user.id ? cookieOf(req, COOKIE) : null }))); } catch (e) { return send(res, 400, { error: e.message }); }
       }
       if (m === 'DELETE') { try { accounts.deleteUser(uid, { actorId: ctx.user.id }); storyReg.forgetUser(uid); binderSetCache.delete(uid); communityCache = null; cmIdx = null; return send(res, 200, { ok: true }); } catch (e) { return send(res, 400, { error: e.message }); } }
     }
@@ -1143,6 +1318,7 @@ async function handleApi(req, res, url) {
       return r;
     };
     if (ctx.user && link) { try { accounts.setRead(ctx.user.id, normalizeUrl(link), true); readCache.delete(ctx.user.id); } catch {} }   // reading it = read
+    if (stored) stored.filedBy = filerName(stored.filedBy);
     if (stored?.ok) return send(res, 200, finish(stored));         // archived copy (also survives paywalls / deleted pages)
     if (!ctx.perms.has('reader.fetch')) {
       if (stored) return send(res, 200, stored);
@@ -1154,12 +1330,18 @@ async function handleApi(req, res, url) {
       // Wayback copy whenever the original can't be read; live ones only when the page is gone
       const archived = !!row && (row.published < Date.now() - LIVE_DAYS * 864e5 || row.origin !== 'live');
       let r = await readArticle(link, { wayback: true, anyFailure: archived, date: row?.published ?? (Number(url.searchParams.get('date')) || null) });
+      // manual / fragment mode: reading doesn't file it (binder saves and "File in the morgue" do)
+      const mm = morgueMode();
+      if ((mm === 'manual' || mm === 'fragment') && !stored?.morgue) {
+        const no = id != null ? archive.morgueOf(id) : null;               // (already filed as a fragment: say so)
+        return send(res, 200, finish({ ...r, notFiled: mm, ...(no ? { morgue: no, fragment: true, filedBy: filerName(archive.filedByOf(id)) } : {}) }));
+      }
       if (id != null && (r.ok || !stored)) {
         try {
-          archive.saveBody(id, r);
+          archive.saveBody(id, r, ctx.user ? `user:${ctx.user.id}` : 'guest');   // (guest: an admin gave visitors reader.fetch)
           const no = archive.morgueOf(id), st = archive.bodyState(id)?.status;
           // (a fragment that still couldn't be read keeps its number: say so, so the reader shows its fragment tag)
-          if (no) r = { ...r, morgue: no, archived: Date.now(), ...(st === 'ok' || st === 'partial' ? {} : { fragment: true }) };
+          if (no) r = { ...r, morgue: no, archived: Date.now(), filedBy: filerName(archive.filedByOf(id)), ...(st === 'ok' || st === 'partial' ? {} : { fragment: true }) };
         }
         catch (e) { console.error('[fulltext] save failed', e.message); }
       }
@@ -1263,7 +1445,8 @@ async function handleApi(req, res, url) {
     const t = normalizeUrl(link);
     const row = archive?.articleRow(link) || null;
     const full = row ? archive.db.prepare('SELECT * FROM articles WHERE id = ?').get(row.id) : null;
-    const body = row ? archive.db.prepare('SELECT status, words, byline, fetched, morgue FROM bodies WHERE id = ?').get(row.id) || null : null;
+    const body = row ? archive.db.prepare('SELECT status, words, byline, fetched, morgue, filed_by FROM bodies WHERE id = ?').get(row.id) || null : null;
+    if (body) { body.filedBy = filerName(body.filed_by); delete body.filed_by; }
     const sr = ctx.user ? storyReadsOf(ctx.user.id) : null;
     // stories still in the live window show their current lead headline (in your ranking); older ones the last one
     const live = new Map(cachedStories(collectArticles({ hours: LIVE_DAYS * 24 }), ctx.sMap, { hours: LIVE_DAYS * 24, sourceId: null, minSources: 3 }).map((st) => [st.sid, st]));
@@ -1275,28 +1458,77 @@ async function handleApi(req, res, url) {
   }
 
   // ── read / unread ── (POST { link | links[], read: true|false }) — your own, signed in
-  // ── research binder: saved stories, articles and quotes (per user) ──
+  // ── File in the morgue (right-click): files an article now and fetches its text (fragment mode: headline + summary) ──
+  if (parts[0] === 'morgue' && parts[1] === 'file' && m === 'POST') {
+    if (!ctx.user) return send(res, 401, { error: 'sign in to file articles in the morgue' });
+    need(ctx, 'reader.fetch');
+    if (!archive) return send(res, 503, { error: 'the archive is unavailable' });
+    const { link } = await readBody(req);
+    if (!/^https?:\/\//.test(String(link || ''))) return send(res, 400, { error: 'article link required' });
+    const art = resolveArticle(String(link), `user:${ctx.user.id}`);
+    if (!art) return send(res, 404, { error: "that article isn't in the live feeds or the archive" });
+    const bs = archive.bodyState(archive.articleId(art.link));
+    // (its text is on its way unless: fragment mode, or the site already refused it — that's the Wayback sweep's)
+    const fetching = bs?.status === 'fragment' && morgueMode() !== 'fragment' && !(bs.tries > 0 && Archive.refused(bs.reason));
+    return send(res, 200, { morgue: art.morgue, link: art.link, fetching, filedBy: filerName(archive.filedByOf(archive.articleId(art.link))) });
+  }
+
+  // ── research binder: saved stories, articles, quotes and notes; binders can be shared (see lib/accounts.js) ──
   if (parts[0] === 'binder') {
     if (!ctx.user) return send(res, 401, { error: 'sign in to keep a research binder' });
     need(ctx, 'binder.use');
     const uid = ctx.user.id;
-    if (m !== 'GET') binderSetCache.delete(uid);          // saved: reflects the change on the next query
-    // binders: list / create / rename / delete
+    if (m !== 'GET') binderSetCache.clear();              // saved: reflects the change on the next query (anyone sharing it)
+    const fail = (e) => send(res, e.status || 400, { error: e.message });
+    // binders: list / create / rename / delete / share / leave
     if (parts[1] === 'books') {
       const bid = Number(parts[2]);
       const name = (v) => String(v || '').replace(/\s+/g, ' ').trim().slice(0, 40);
       if (m === 'POST' && !parts[2]) { const b = await readBody(req); return send(res, 200, { book: accounts.bookCreate(uid, name(b.name) || 'Untitled binder') }); }
-      if (m === 'PATCH' && bid) { const b = await readBody(req); if (!name(b.name)) return send(res, 400, { error: 'name required' }); return send(res, accounts.bookRename(uid, bid, name(b.name)) ? 200 : 404, { ok: true }); }
-      if (m === 'DELETE' && bid) return accounts.bookDelete(uid, bid) ? send(res, 200, { ok: true }) : send(res, 400, { error: "can't delete your only binder" });
+      if (!bid) return send(res, 400, { error: 'bad binder id' });
+      const role = accounts.bookRole(uid, bid);
+      if (!role) return send(res, 404, { error: 'no such binder' });
+      // shares: POST { username, role: read|add|edit|null } — owner only; DELETE …/shares/me leaves a shared binder
+      if (parts[3] === 'shares') {
+        if (m === 'DELETE' && parts[4] === 'me') return send(res, accounts.bookLeave(uid, bid) ? 200 : 404, { ok: true });
+        if (role !== 'owner') return send(res, 403, { error: 'only the owner can share this binder' });
+        if (m === 'GET') return send(res, 200, { shares: accounts.bookShares(bid) });
+        if (m === 'POST') {
+          const b = await readBody(req);
+          const who = accounts.q.userByName.get(String(b.username || '').trim().replace(/^@/, ''));
+          // (the same answer for "no such user" and "can't keep a binder": no probing for accounts)
+          if (!who || who.disabled || !accounts.rolePerms(who.role).has('binder.use')) return send(res, 404, { error: 'no user by that name can be given a binder' });
+          try { accounts.bookShare(uid, bid, who.id, b.role === null ? null : String(b.role || 'read')); } catch (e) { return fail(e); }
+          return send(res, 200, { shares: accounts.bookShares(bid) });
+        }
+        return send(res, 405, { error: 'method not allowed' });
+      }
+      if (m === 'PATCH') {
+        if (role !== 'owner') return send(res, 403, { error: 'only the owner can rename this binder' });
+        const b = await readBody(req); if (!name(b.name)) return send(res, 400, { error: 'name required' });
+        return send(res, accounts.bookRename(uid, bid, name(b.name)) ? 200 : 404, { ok: true });
+      }
+      if (m === 'DELETE') {
+        if (role !== 'owner') return send(res, 403, { error: 'only the owner can delete this binder' });
+        return accounts.bookDelete(uid, bid) ? send(res, 200, { ok: true }) : send(res, 400, { error: "can't delete your only binder" });
+      }
       return send(res, 405, { error: 'method not allowed' });
     }
     if (m === 'GET' && !parts[1]) {
       const live = liveStoryIndex(ctx);
       const entries = accounts.binder(uid);
-      const books = accounts.books(uid).map((b) => ({ id: b.id, name: b.name, count: entries.filter((e) => e.book === b.id).length }));
+      const users = new Map();
+      const userName = (id) => { if (!users.has(id)) { const u = accounts.user(id); users.set(id, u ? u.display || u.username : 'someone'); } return users.get(id); };
+      const books = accounts.books(uid).map((b) => ({ id: b.id, name: b.name, role: b.role, count: entries.filter((e) => e.book === b.id).length,
+        ...(b.role === 'owner' ? { shares: accounts.bookShares(b.id).map(({ userId, username, display, role }) => ({ userId, username, display, role })) } : { owner: userName(b.ownerId) }) }));
+      const roleOf = new Map(books.map((b) => [b.id, b.role]));
       const items = entries.map((e) => {
-        const out = { id: e.id, book: e.book, kind: e.kind, link: e.link, sid: e.sid, title: e.title, sourceId: e.source_id, published: e.published, morgue: e.morgue, quote: e.quote, note: e.note, created: e.created };
-        if (e.kind === 'story') {
+        const role = roleOf.get(e.book);
+        const out = { id: e.id, book: e.book, kind: e.kind, link: e.link, sid: e.sid, title: e.title, sourceId: e.source_id, published: e.published, morgue: e.morgue,
+          quote: e.quote, note: e.note, created: e.created, edited: e.edited || null,
+          by: e.user_id === uid ? null : (e.author_display || e.author_username || 'someone'),    // (null: you)
+          canChange: role === 'owner' || role === 'edit' || (role === 'add' && e.user_id === uid) };
+        if (e.sid) {
           const st = live.get(e.sid);
           const reg = storyReg.story(e.sid);
           out.live = !!st;
@@ -1317,37 +1549,70 @@ async function handleApi(req, res, url) {
     }
     if (m === 'POST' && !parts[1]) {
       const b = await readBody(req);
-      const kind = ['story', 'article', 'quote'].includes(b.kind) ? b.kind : null;
-      if (!kind) return send(res, 400, { error: 'kind must be story, article or quote' });
-      if (kind === 'story') {
-        const sid = String(b.sid || '').toLowerCase();
-        if (!/^[0-9a-f]{6}$/.test(sid)) return send(res, 400, { error: 'story number required' });
-        const st = liveStoryIndex(ctx).get(sid), reg = storyReg.story(sid);
-        if (!st && !reg) return send(res, 404, { error: 'no such story' });
-        if (b.remove) return send(res, 200, { removed: accounts.binderRemove(uid, 'story', sid, b.book) });
-        const e = accounts.binderAdd(uid, { book: b.book, kind, target: sid, sid, link: st?.link || reg?.link, title: st?.title || reg?.title,
-          sourceId: st?.leadSource || null, published: st?.newest || reg?.newest || null, note: cleanNote(b.note) });
+      const kind = ['story', 'article', 'quote', 'note'].includes(b.kind) ? b.kind : null;
+      if (!kind) return send(res, 400, { error: 'kind must be story, article, quote or note' });
+      const book = b.book != null ? Number(b.book) : undefined;
+      try {
+        const note = kind === 'note' ? cleanNote(b.note) : null;
+        if (kind === 'note' && !note) return send(res, 400, { error: 'the note is empty' });
+        // a note cites a story (sid), an article (link) — or nothing
+        if (kind === 'story' || (kind === 'note' && b.sid)) {
+          const sid = String(b.sid || '').toLowerCase();
+          if (!/^[0-9a-f]{6}$/.test(sid)) return send(res, 400, { error: 'story number required' });
+          const st = liveStoryIndex(ctx).get(sid), reg = storyReg.story(sid);
+          if (!st && !reg) return send(res, 404, { error: 'no such story' });
+          if (kind === 'story' && b.remove) return send(res, 200, { removed: accounts.binderRemove(uid, 'story', sid, book) });
+          const e = accounts.binderAdd(uid, { book, kind, target: sid, sid, link: st?.link || reg?.link, title: st?.title || reg?.title,
+            sourceId: st?.leadSource || null, published: st?.newest || reg?.newest || null, note });
+          return send(res, 200, { item: e });
+        }
+        if (kind === 'note' && !b.link) {
+          const e = accounts.binderAdd(uid, { book, kind, target: `note:${crypto.randomBytes(6).toString('hex')}`, note });
+          return send(res, 200, { item: e });
+        }
+        const link = String(b.link || '');
+        if (!/^https?:\/\//.test(link)) return send(res, 400, { error: 'article link required' });
+        if (kind === 'article' && b.remove) return send(res, 200, { removed: accounts.binderRemove(uid, 'article', normalizeUrl(link), book) });
+        const art = resolveArticle(link, `user:${uid}`);
+        if (!art) return send(res, 404, { error: "that article isn't in the live feeds or the archive" });
+        const quote = kind === 'quote' ? String(b.quote || '').replace(/\s+/g, ' ').trim().slice(0, 3000) : null;
+        if (kind === 'quote' && quote.length < 2) return send(res, 400, { error: 'select some text to quote' });
+        const e = accounts.binderAdd(uid, { book, kind, target: normalizeUrl(art.link), link: art.link, title: art.title, sourceId: art.sourceId,
+          published: art.date, morgue: art.morgue, quote, note });
         return send(res, 200, { item: e });
-      }
-      const link = String(b.link || '');
-      if (!/^https?:\/\//.test(link)) return send(res, 400, { error: 'article link required' });
-      if (kind === 'article' && b.remove) return send(res, 200, { removed: accounts.binderRemove(uid, 'article', normalizeUrl(link), b.book) });
-      const art = resolveArticle(link);
-      if (!art) return send(res, 404, { error: "that article isn't in the live feeds or the archive" });
-      const quote = kind === 'quote' ? String(b.quote || '').replace(/\s+/g, ' ').trim().slice(0, 3000) : null;
-      if (kind === 'quote' && quote.length < 2) return send(res, 400, { error: 'select some text to quote' });
-      const e = accounts.binderAdd(uid, { book: b.book, kind, target: normalizeUrl(art.link), link: art.link, title: art.title, sourceId: art.sourceId,
-        published: art.date, morgue: art.morgue, quote, note: cleanNote(b.note) });
-      return send(res, 200, { item: e });
+      } catch (e) { return fail(e); }
     }
     const id = Number(parts[1]);
     if (!Number.isInteger(id)) return send(res, 400, { error: 'bad id' });
-    if (m === 'PATCH') {
-      const b = await readBody(req);
-      if (b.book != null) return send(res, accounts.binderMove(uid, id, b.book) ? 200 : 404, { ok: true });
-      return send(res, accounts.binderNote(uid, id, cleanNote(b.note)) ? 200 : 404, { ok: true });
-    }
-    if (m === 'DELETE') return send(res, accounts.binderDelete(uid, id) ? 200 : 404, { ok: true });
+    try {
+      if (m === 'PATCH') {
+        const b = await readBody(req);
+        if (b.book != null) return send(res, accounts.binderMove(uid, id, b.book) ? 200 : 404, { ok: true });
+        // link an unlinked note: cite = a morgue no. (8 hex), a story no. (6 hex) — with or without morgue: / story: —
+        // or an article's address
+        if (b.cite != null) {
+          const ref = String(b.cite).trim().toLowerCase().replace(/^(morgue|uuid|nid|story)\s*:\s*/, (m) => (m.startsWith('story') ? 'story:' : ''));
+          let c = null;
+          if (/^story:[0-9a-f]{6}$/.test(ref) || /^[0-9a-f]{6}$/.test(ref)) {
+            const sid = ref.replace('story:', '');
+            const st = liveStoryIndex(ctx).get(sid), reg = storyReg.story(sid);
+            if (!st && !reg) return send(res, 404, { error: `no story ${sid}` });
+            c = { target: sid, sid, link: st?.link || reg?.link, title: st?.title || reg?.title, sourceId: st?.leadSource || null, published: st?.newest || reg?.newest || null };
+          } else {
+            const link = /^[0-9a-f]{8}$/.test(ref) ? archive?.linkByMorgue(ref) : /^https?:\/\//.test(String(b.cite).trim()) ? String(b.cite).trim() : null;
+            if (!link) return send(res, 404, { error: /^[0-9a-f]{8}$/.test(ref) ? `no article with morgue no. ${ref}` : 'paste a morgue no. (8 characters), a story no. (6) or an article link' });
+            const art = resolveArticle(link, `user:${uid}`);
+            if (!art) return send(res, 404, { error: "that article isn't in the live feeds or the archive" });
+            c = { target: normalizeUrl(art.link), link: art.link, title: art.title, sourceId: art.sourceId, published: art.date, morgue: art.morgue };
+          }
+          return send(res, accounts.binderLink(uid, id, c) ? 200 : 404, { ok: true, cites: c.sid ? `story ${c.sid}` : `morgue no. ${c.morgue}`, title: c.title });
+        }
+        const note = cleanNote(b.note);
+        if (!note) return send(res, 400, { error: 'the note is empty — remove it instead' });
+        return send(res, accounts.binderNote(uid, id, note) ? 200 : 404, { ok: true });
+      }
+      if (m === 'DELETE') return send(res, accounts.binderDelete(uid, id) ? 200 : 404, { ok: true });
+    } catch (e) { return fail(e); }
     return send(res, 405, { error: 'method not allowed' });
   }
 
@@ -1406,7 +1671,7 @@ async function handleApi(req, res, url) {
       let disk = null;
       try { disk = archive.diskUsage(); } catch {}
       return send(res, 200, { ...st, total: Math.max(st.total, archive.approxTotal()), backfill: backfill.status(), disk,
-        fulltext: harvest ? { ...(harvest.stats() || {}), harvester: harvest.status() } : null, sources: Object.fromEntries(db.sources.map((s) => [s.id, { name: s.name, bias: s.bias, ...(st.sources[s.id] || { count: 0, files: {} }) }])) });
+        fulltext: harvest ? withFilers({ ...(harvest.stats() || {}), harvester: harvest.status() }) : null, sources: Object.fromEntries(db.sources.map((s) => [s.id, { name: s.name, bias: s.bias, ...(st.sources[s.id] || { count: 0, files: {} }) }])) });
     }
     if (m === 'POST') {
       need(ctx, 'archive.manage');
@@ -1416,9 +1681,11 @@ async function handleApi(req, res, url) {
         if (b.since && !Number.isFinite(since)) return send(res, 400, { error: 'since must be a date like 2010-01-01' });
         backfill.start(since);
       } else if (b.action === 'pause') backfill.pause();
-      else if (b.action === 'fulltext-start' && harvest) { harvest.start(); archive.kv('fulltextEnabled', true); }
-      else if (b.action === 'fulltext-pause' && harvest) { harvest.pause(); archive.kv('fulltextEnabled', false); }
-      else return send(res, 400, { error: 'action must be start, pause, fulltext-start or fulltext-pause' });
+      else if (b.action === 'morgue-mode') { try { setMorgueMode(String(b.mode || '')); } catch (e) { return send(res, 400, { error: e.message }); } }
+      else if (b.action === 'fragment-all') setFragmentAll(b.on !== false);
+      else if (b.action === 'fulltext-start') setMorgueMode('auto');                 // (older clients)
+      else if (b.action === 'fulltext-pause') setMorgueMode('adhoc');
+      else return send(res, 400, { error: 'action must be start, pause, morgue-mode or fragment-all' });
       return send(res, 200, backfill.status());
     }
   }
@@ -1586,6 +1853,11 @@ function commentCounts(items) {
 }
 
 const server = http.createServer(async (req, res) => {
+  // on every response: no framing by other sites (clickjacking), no MIME sniffing, no full URLs in Referer
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'");
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'same-origin');
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   try {
     if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
@@ -1616,17 +1888,17 @@ try {
   archive = new Archive(path.join(DATA_DIR, 'archive.db'));
   // crawling, parsing and bulk inserts run in a worker thread so they never stall web requests
   backfill = new BackfillWorker({ dbFile: path.join(DATA_DIR, 'archive.db'), getSources: () => db.sources, autostart: process.env.BACKFILL !== '0', log: (m) => console.log(m) });
-  // full text of every live-feed article (off with FULLTEXT=0; pause/resume from the archive panel is remembered)
-  if (process.env.FULLTEXT !== '0') {
-    harvest = new HarvestWorker({ dbFile: path.join(DATA_DIR, 'archive.db'), enabled: archive.kv('fulltextEnabled') !== false,
-      backlogDays: Number(process.env.FULLTEXT_BACKLOG_DAYS) || 7, log: (m) => console.log(m) });
-  }
+  // the auto-filer: fetches and files article text — every live-feed article in auto mode, otherwise what people file
+  harvest = new HarvestWorker({ dbFile: path.join(DATA_DIR, 'archive.db'), mode: morgueMode(), fragmentAll: fragmentAll(),
+    backlogDays: Number(process.env.FULLTEXT_BACKLOG_DAYS) || 7, log: (m) => console.log(m) });
 } catch (e) {
   console.error('[archive] disabled:', e.message);
 }
 
 server.listen(PORT, HOST, () => {
   console.log(`\n  ▓▓ STRINGER online → http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}\n`);
+  issueSetupToken();
+  console.log(REGEX_MODE === 'linear' ? '[query] regex terms: linear-time engine' : '[query] regex terms are OFF — start with --enable-experimental-regexp-engine (npm start does)');
   seedLive();
   refreshAll();
   setInterval(refreshAll, REFRESH_MS);

@@ -3,7 +3,7 @@
 // sites refuse to be framed, so this is the in-app equivalent. Falls back to an embedded frame / new tab.
 // morgue no. tag (same markup as app.js; the click-to-copy handler lives there, on the document)
 const morgueTag = (morgue, esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])) =>
-  `<button type="button" class="link morgue" data-act="copy-morgue" data-morgue="${esc(morgue)}" title="${esc(`STRINGER's catalog number for its saved copy of this article — newsrooms call their archive of clippings “the morgue”.`)}" data-tip-head="▣ STRINGER MORGUE" data-tip-head-right="no. ${esc(morgue.slice(0, 8))}" data-tip-foot="click to copy · find it with morgue:${esc(morgue.slice(0, 8))}">morgue no. ${esc(morgue.slice(0, 8))}</button>`;
+  `<button type="button" class="link morgue" data-act="copy-morgue" data-morgue="${esc(morgue)}" title="${esc(`STRINGER's catalog number for the copy of this article it filed — newsrooms call their archive of clippings “the morgue”.`)}" data-tip-head="▣ STRINGER MORGUE" data-tip-head-right="no. ${esc(morgue.slice(0, 8))}" data-tip-foot="click to copy · find it with morgue:${esc(morgue.slice(0, 8))}">morgue no. ${esc(morgue.slice(0, 8))}</button>`;
 const FONTS = [['mono', 'monospace'], ['serif', 'serif'], ['sans', 'sans-serif']];
 
 export function createReader(ctx) {
@@ -174,12 +174,29 @@ export function createReader(ctx) {
     page.querySelector('.rd-meta')?.replaceWith(tmp.querySelector('.rd-meta'));
     addQueryTag();
   }
+  // Is this picture already in the article text? Sites serve one image under several addresses (another CDN host,
+  // a resized path like …/1200/675/…, a -1200x675 suffix, another format, a query string): compare by file name.
+  // (A short or generic name falls back to the exact address — better a duplicate than a missing photo.)
+  const imgKey = (u) => {
+    try {
+      const f = decodeURIComponent(new URL(u, 'https://x.invalid').pathname.split('/').filter(Boolean).pop() || '').toLowerCase();
+      const k = f.replace(/\.(jpe?g|png|webp|gif|avif)$/, '').replace(/[-_@](\d{2,4}x\d{2,4}|\d{2,4}w|[23]x)$/, '');
+      return k.length >= 8 && !/^(image|photo|img|picture|hero|lead|default)[-_]?\d*$/.test(k) && !/^\d+$/.test(k) ? k : '';
+    } catch { return ''; }
+  };
+  function hasImage(html, url) {
+    const unamp = (x) => x.replace(/&amp;/g, '&');
+    const srcs = [...String(html || '').matchAll(/<img\b[^>]*\bsrc="([^"]+)"/gi)].map((m) => unamp(m[1]));
+    if (srcs.includes(url)) return true;
+    const k = imgKey(url);
+    return !!k && srcs.some((s) => imgKey(s) === k);
+  }
   function header(r) {
     const a = cur;
     const title = r?.retitled || r?.title || a.title || '';
     const bits = [r?.byline && `by ${esc(r.byline)}`, (r?.published || a.date) && esc(fmtDate(r?.published || a.date)), r?.words && `${Math.max(1, Math.round(r.words / 230))} min read`].filter(Boolean);
     // ▣ MORGUE: this text is STRINGER's saved copy (filed in the morgue; survives the page dying)
-    const arch = r?.morgue ? `<button type="button" class="ft${r.fragment ? ' partial' : ''}" data-act="copy-morgue" data-morgue="${esc(r.morgue)}" title="${esc(r.fragment ? 'filed in the morgue as a fragment — headline and summary only; the full text could not be saved' : `filed in the morgue ${r.archived ? fmtDate(r.archived) : ''} · ${(r.words || 0).toLocaleString()} words`)}" data-tip-head="▣ STRINGER MORGUE" data-tip-head-right="no. ${esc(r.morgue)}" data-tip-note="searchable with body: · the reader opens this copy" data-tip-foot="click to copy · find it with morgue:${esc(r.morgue)}">▣ MORGUE ${esc(r.morgue)}${r.fragment ? ' · fragment' : ''}</button>` : '';
+    const arch = r?.morgue ? `<button type="button" class="ft${r.fragment ? ' partial' : ''}" data-act="copy-morgue" data-morgue="${esc(r.morgue)}" title="${esc(r.fragment ? 'filed in the morgue as a fragment — headline and summary only; the full text could not be filed' : `filed in the morgue ${r.archived ? fmtDate(r.archived) : ''} · ${(r.words || 0).toLocaleString()} words`)}" data-tip-head="▣ STRINGER MORGUE" data-tip-head-right="no. ${esc(r.morgue)}" data-tip-note="searchable with body: · the reader opens this copy" data-tip-foot="click to copy · find it with morgue:${esc(r.morgue)}">▣ MORGUE ${esc(r.morgue)}${r.fragment ? ' · fragment' : ''}</button>` : '';
     // the morgue tag and read badge get their own line under the details, so a long byline can't wrap them oddly
     const tags = [arch, readBadge().trim()].filter(Boolean);
     return `<h1>${esc(title)}</h1><div class="rd-meta"><div>${esc(r?.site || srcById(a.sourceId)?.name || '')}${bits.length ? ' · ' + bits.join(' · ') : ''}</div>${tags.length ? `<div class="rd-tags">${tags.join('')}</div>` : ''}</div>`;
@@ -226,12 +243,13 @@ export function createReader(ctx) {
       : `reader view unavailable — ${esc(r.reason || 'no article text found')}`, r.ok || r.content ? '' : 'warn');
     ctx.onRead?.(article.link, r);                         // now STRINGER-archived / headline upgraded → update the page
     if (!r.ok && !r.content) return frame(fallback(r.reason || 'no article text found', r));
-    const lead = r.image && !r.content.includes(r.image) ? `<figure class="rd-lead"><img src="${esc(r.image)}" alt="" referrerpolicy="no-referrer" onerror="this.parentNode.remove()"></figure>` : '';
+    const lead = r.image && !hasImage(r.content, r.image) ? `<figure class="rd-lead"><img src="${esc(r.image)}" alt="" referrerpolicy="no-referrer" onerror="this.parentNode.remove()"></figure>` : '';
     const wb = r.wayback;
     const wbDate = wb && new Date(+wb.timestamp.slice(0, 4), +wb.timestamp.slice(4, 6) - 1, +wb.timestamp.slice(6, 8)).getTime();   // local day, not UTC midnight
     const wbWhy = wb && (wb.gone !== false ? `the original page is gone (${wb.reason.replace(/^the page no longer exists \(?|\)$/g, '') || 'dead link'})` : `the original couldn't be read — ${wb.reason}`);
-    frame(`${header(r)}${wb ? `<div class="rd-warn rd-wayback">⌛ ${esc(wbWhy)} — this is the Wayback Machine copy saved ${esc(fmtDate(wbDate))} · <a href="${esc(safeUrl(wb.url))}" target="_blank" rel="noopener noreferrer">view on archive.org ↗</a></div>` : ''}${r.ok ? '' : `<div class="rd-warn">⚠ ${esc(r.reason)} — <a href="${esc(safeUrl(cur.link))}" target="_blank" rel="noopener noreferrer">open the original ↗</a></div>`}${lead}<div class="rd-content">${r.content}</div>
-      <div class="rd-end dim">— end of ${r.morgue ? `the morgue copy (saved ${esc(fmtDate(r.archived || Date.now()))} · ${morgueTag(r.morgue)})` : 'extracted text'} · <a href="${esc(safeUrl(wb ? wb.url : r.url || cur.link))}" target="_blank" rel="noopener noreferrer">${wb ? 'read the archived copy' : `read on ${esc(r.site || 'the site')}`} ↗</a></div>`);
+    frame(`${header(r)}${wb ? `<div class="rd-warn rd-wayback">⌛ ${esc(wbWhy)} — this is the Wayback Machine copy captured ${esc(fmtDate(wbDate))} · <a href="${esc(safeUrl(wb.url))}" target="_blank" rel="noopener noreferrer">view on archive.org ↗</a></div>` : ''}${r.ok ? '' : `<div class="rd-warn">⚠ ${esc(r.reason)} — <a href="${esc(safeUrl(cur.link))}" target="_blank" rel="noopener noreferrer">open the original ↗</a></div>`}${lead}<div class="rd-content">${r.content}</div>
+      ${r.notFiled && !r.morgue ? `<div class="rd-end dim">▣ not filed — the morgue is in ${r.notFiled} mode, so reading doesn't file articles · right-click → <b>File in the morgue</b> to keep it</div>` : ''}
+      <div class="rd-end dim">— end of ${r.morgue ? `the morgue copy (filed ${esc(fmtDate(r.archived || Date.now()))}${r.filedBy ? ` by ${esc(r.filedBy)}` : ''} · ${morgueTag(r.morgue)})` : 'extracted text'} · <a href="${esc(safeUrl(wb ? wb.url : r.url || cur.link))}" target="_blank" rel="noopener noreferrer">${wb ? 'read the archived copy' : `read on ${esc(r.site || 'the site')}`} ↗</a></div>`);
     body.querySelectorAll('.rd-content img').forEach((img) => img.addEventListener('error', () => img.remove()));
     markQueryTerms();
   }

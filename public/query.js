@@ -225,7 +225,7 @@ function makeLeaf(field, t) {
     if (f && f.kind !== 'text' && f.kind !== 'keyword' && f.kind !== 'domain') node.value = typed(field, node.value, node);
   } else if (t.t === 'REGEX') {
     if (!t.closed) throw new QueryError('unterminated /regex/', t.s, t.e - t.s);
-    try { node.re = new RegExp(t.v, 'iu'); } catch (e) { throw new QueryError(`bad regex: ${e.message}`, t.s, t.e - t.s); }
+    node.re = compileRegex(t.v, t);
     node.kind = 'regex';
   } else if (t.t === 'RANGE') {
     if (!t.closed) throw new QueryError('unterminated range — use [a TO b]', t.s, t.e - t.s);
@@ -254,7 +254,50 @@ function makeLeaf(field, t) {
   return node;
 }
 
+// ── regex terms ──
+// The server runs queries one at a time, so a regex that backtracks exponentially (/^(\w+\s?)*$/) would freeze it.
+// On the server they're compiled for V8's linear-time engine (node --enable-experimental-regexp-engine, flag 'l'),
+// which can't blow up. That engine has no case-insensitive mode, so the pattern is lowercased (escapes kept as
+// written) and matched against the lowercased text the server already compares with. Without the engine the server
+// refuses regex terms rather than guess which are safe. In the browser (validation, highlighting) the normal engine
+// is fine: a bad pattern there could only slow your own tab.
+const IS_SERVER = typeof process !== 'undefined' && !!process.versions?.node && typeof window === 'undefined';
+let LINEAR = false;
+if (IS_SERVER) { try { new RegExp('a', 'l'); LINEAR = true; } catch { /* started without the flag */ } }
+export const REGEX_MODE = IS_SERVER ? (LINEAR ? 'linear' : 'off') : 'browser';
+function compileRegex(src, t) {
+  const err = (msg) => new QueryError(msg, t.s, t.e - t.s);
+  if (!IS_SERVER) { try { return new RegExp(src, 'iu'); } catch (e) { throw err(`bad regex: ${e.message}`); } }
+  if (!LINEAR) throw err("regex terms are off on this server (start it with node --enable-experimental-regexp-engine, as npm start does)");
+  // lowercase the pattern's own letters; an escape (\W, \S, \B, \D…) is kept exactly as written
+  let out = '';
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c !== '\\') { out += c.toLowerCase(); continue; }
+    const n = src[i + 1] ?? '';
+    if (/[1-9]/.test(n) || n === 'k') throw err('backreferences (\\1, \\k<name>) aren\'t supported in regex terms');
+    if ((n === 'p' || n === 'P' || n === 'u') && src[i + 2] === '{') throw err('\\p{…} / \\u{…} escapes aren\'t supported in regex terms');
+    if (n === 'c') { out += c + n + (src[i + 2] ?? ''); i += 2; continue; }      // \cX: a control character
+    out += c + n; i++;
+  }
+  try { return new RegExp(out, 'l'); } catch (e) {
+    throw err(/linear time/i.test(e.message) ? "that regex can't be run in guaranteed linear time — simplify it" : `bad regex: ${e.message.replace(/^Invalid regular expression: /, '')}`);
+  }
+}
+// limits that keep a single query from being expensive however it's written
+const MAX_QUERY = 1000, MAX_REGEX_TERMS = 5, MAX_WILD_TERMS = 12;
+
 export function parseQuery(src) {
+  if (String(src).length > MAX_QUERY) throw new QueryError(`the query is too long (over ${MAX_QUERY} characters)`, MAX_QUERY, 0);
+  const ast = parseQueryInner(src);
+  let rx = 0, wild = 0;
+  const count = (n) => { if (!n) return; if (n.type === 'term') { if (n.kind === 'regex') rx++; else if (n.kind === 'wild' || n.kind === 'fuzzy') wild++; return; } if (n.item) count(n.item); for (const i of n.items || []) count(i); };
+  count(ast);
+  if (rx > MAX_REGEX_TERMS) throw new QueryError(`too many /regex/ terms (${rx}; at most ${MAX_REGEX_TERMS})`, 0, String(src).length);
+  if (wild > MAX_WILD_TERMS) throw new QueryError(`too many wildcard / fuzzy terms (${wild}; at most ${MAX_WILD_TERMS})`, 0, String(src).length);
+  return ast;
+}
+function parseQueryInner(src) {
   const toks = lex(src);
   if (!toks.length) return { type: 'all' };
   let p = 0;
@@ -647,11 +690,19 @@ export function highlightRegexes(ast) {
       if (n.kind === 'word') r = new RegExp(`(?<!${W})${esc(n.value)}${W}*`, 'giu');
       else if (n.kind === 'phrase') r = new RegExp(`(?<!${W})${esc(n.value).replace(/ /g, '\\s+')}(?!${W})`, 'giu');
       else if (n.kind === 'wild') r = new RegExp(`(?<!${W})${n.value.split('*').map((p) => p.split('?').map(esc).join(W)).join(`${W}*`)}${W}*`, 'giu');
-      else if (n.kind === 'regex') r = new RegExp(n.re.source, [...new Set(n.re.flags + 'gi')].filter((f) => f !== 'y').join(''));
+      else if (n.kind === 'regex') {
+        // the browser has no linear-time engine: a pattern that could backtrack badly isn't highlighted (the server
+        // still matches it). Headlines are short; the reader's article text is long, so it gets a stricter limit.
+        const src = n.re.source;
+        if (!regexBrowserSafe(src, 3)) return;
+        r = new RegExp(src, [...new Set(n.re.flags + 'gi')].filter((f) => f !== 'y').join(''));
+        r.longSafe = regexBrowserSafe(src, 1);
+      }
     } catch {}
     if (!r) return;
-    if (n.field === 'body') { out.body.push(r); return; }          // the article's full text (the reader)
-    if (n.field === 'text') out.body.push(r);                     // text: also searches the full text
+    const bodyOk = n.kind !== 'regex' || r.longSafe;
+    if (n.field === 'body') { if (bodyOk) out.body.push(r); return; }   // the article's full text (the reader)
+    if (n.field === 'text' && bodyOk) out.body.push(r);                  // text: also searches the full text
     if (n.field !== 'summary') out.title.push(r);
     if (n.field !== 'title') out.summary.push(r);
   };
@@ -677,4 +728,46 @@ export function expandText(ast) {
   if (ast.type === 'term') return ast.field === 'text' && !ast._inner ? { type: 'or', items: [{ ...ast, _inner: true }, { ...ast, field: 'body', _inner: true }] } : ast;
   if (ast.type === 'not') return { ...ast, item: expandText(ast.item) };
   return ast.items ? { ...ast, items: ast.items.map(expandText) } : ast;
+}
+
+// Can this regex run in the browser's (backtracking) engine without risk? No quantified group that itself contains
+// a quantifier or an alternation (the exponential cases), and at most maxUnbounded open-ended repeats (* + {n,}),
+// which bounds the polynomial cases on the text it runs against.
+export function regexBrowserSafe(src, maxUnbounded = 3) {
+  const stack = [];
+  let unbounded = 0, inClass = false;
+  const quantAt = (i) => {
+    const c = src[i];
+    if (c === '*' || c === '+') return { open: true };
+    if (c === '?') return { open: false };
+    if (c === '{') { const m = src.slice(i).match(/^\{(\d+)(,(\d*))?\}/); if (m) return { open: m[2] !== undefined && m[3] === '' , big: m[2] !== undefined }; }
+    return null;
+  };
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === '\\') { i++; continue; }
+    if (inClass) { if (c === ']') inClass = false; continue; }
+    if (c === '[') { inClass = true; continue; }
+    if (c === '(') {
+      stack.push({ inner: false });
+      // a group prefix — (?: (?= (?! (?<= (?<! (?<name> — isn't a quantifier
+      const pre = src.slice(i + 1).match(/^\?(?::|=|!|<=|<!|<[A-Za-z_$][\w$]*>)/);
+      if (pre) i += pre[0].length;
+      continue;
+    }
+    if (c === '|') { if (stack.length) stack[stack.length - 1].inner = true; continue; }
+    if (c === ')') {
+      const g = stack.pop() || { inner: false };
+      const q = quantAt(i + 1);
+      if (q && (q.open || q.big) && g.inner) return false;       // (…+)*, (a|b)+, (…){2,} with a repeat inside
+      if (stack.length && (g.inner || q)) stack[stack.length - 1].inner = true;
+      continue;
+    }
+    const q = quantAt(i);
+    if (q) {
+      if (q.open) unbounded++;
+      if (stack.length) stack[stack.length - 1].inner = true;
+    }
+  }
+  return unbounded <= maxUnbounded;
 }

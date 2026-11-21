@@ -145,7 +145,7 @@ function cmAside(threads, opts = {}) {
       <button type="button" class="pop-cm-rail ${info ? 'needs-perm-comments-read' : ''}" data-act="cm-toggle" title="your notes and the discussion — show / hide (c)"><span class="pop-cm-rail-l">✎ NOTES · DISCUSSION</span> <span class="cm-total"></span> <span class="pop-cm-arrow"></span></button>
       ${info ? '<button type="button" class="pop-cm-rail pop-info-rail" data-act="info-toggle" title="show / hide this article\'s details: outlet, morgue, read state, the stories it belongs to (i)"><span class="pop-cm-rail-l">ⓘ DETAILS</span> <span class="pop-cm-arrow"></span></button>' : ''}
     </div>
-    <div class="pop-cm-body">${opts.notes ? `<div class="pop-cm-sec pop-note-sec"><h4>✎ MY NOTES <span class="dim note-where"></span></h4><div id="${opts.notes}" class="note-slot"></div></div>` : ''}${threads.filter(Boolean).map(([title, id]) => `<div class="pop-cm-sec needs-perm-comments-read"><h4>${title} <span class="dim cm-count"></span></h4><div id="${id}" class="cm-slot"></div></div>`).join('')}</div>
+    <div class="pop-cm-body">${opts.notes ? `<div class="pop-cm-sec pop-note-sec"><h4>✎ NOTES <span class="dim note-where"></span></h4><div id="${opts.notes}" class="note-slot"></div></div>` : ''}${threads.filter(Boolean).map(([title, id]) => `<div class="pop-cm-sec needs-perm-comments-read"><h4>${title} <span class="dim cm-count"></span></h4><div id="${id}" class="cm-slot"></div></div>`).join('')}</div>
     ${info ? `<div class="pop-info-body"><div id="${info}" class="info-slot"></div></div>` : ''}
   </aside>`;
 }
@@ -508,11 +508,11 @@ const morgueShort = (u) => String(u || '').slice(0, 8);
 function morgueTag(morgue) {
   if (!morgue) return '';
   return `<button type="button" class="link morgue" data-act="copy-morgue" data-morgue="${esc(morgue)}"
-    title="${esc(`STRINGER's catalog number for its saved copy of this article — newsrooms call their archive of clippings “the morgue”.`)}"
+    title="${esc(`STRINGER's catalog number for the copy of this article it filed — newsrooms call their archive of clippings “the morgue”.`)}"
     data-tip-head="▣ STRINGER MORGUE" data-tip-head-right="no. ${esc(morgueShort(morgue))}" data-tip-foot="click to copy · find it with morgue:${esc(morgueShort(morgue))}">morgue no. ${esc(morgueShort(morgue))}</button>`;
 }
 function archTip(f) {
-  if (f.fragment) return `filed in the morgue ${f.saved ? isoDay(f.saved) : ''} as a fragment — headline and summary only; the full text hasn't been saved (yet)`;
+  if (f.fragment) return `filed in the morgue ${f.saved ? isoDay(f.saved) : ''} as a fragment — headline and summary only; the full text hasn't been filed (yet)`;
   return `filed in the morgue ${f.saved ? isoDay(f.saved) : ''} · ${(f.words || 0).toLocaleString()} words${f.partial ? ' — a fragment only (paywall?)' : ''}`;
 }
 // the MORGUE tag: shows the morgue no.; clicking it copies the number (words / save date are in the tooltip)
@@ -569,7 +569,11 @@ function hitIn(st) {
   }
   return `<div class="hit-in" title="your search words aren't in the lead article — they matched ${hits.length} other article${hits.length === 1 ? '' : 's'} in this story">⌕ <span class="dim">matched in</span> ${s ? srcLink(a) : ''} <span class="dim">·</span> <span class="hit-what">${what}</span>${hits.length > 1 ? ` <span class="dim">+${hits.length - 1} more</span>` : ''}</div>`;
 }
+// the open tab is a saved query with highlighting turned off (and its query hasn't been edited): no yellow marks —
+// which articles matched (the "matched in" line, the body-match markers) is still worked out, just not painted
+const hlMuted = () => { const sq = state.tabId && state.saved.find((x) => x.id === state.tabId); return !!sq && sq.highlight === false && sq.query.trim() === String(state.q || '').trim(); };
 function hl(text, where) {
+  if (hlMuted()) return esc(String(text ?? ''));
   if (hlFor !== state.q) { hlFor = state.q; try { hlRes = state.q ? highlightRegexes(parseQuery(state.q)) : { title: [], summary: [] }; } catch { hlRes = { title: [], summary: [] }; } }
   const res = hlRes[where];
   const t = String(text ?? '');
@@ -1226,7 +1230,16 @@ const ORIGIN = {
   sitemap: ['outlet sitemap', 'listed in the outlet\'s sitemap — the headline is rebuilt from the URL (≈) and the date can be approximate'],
   hn: ['Hacker News', 'linked from Hacker News — the submission title and time'],
 };
-const BODY_STATUS = { ok: 'in the morgue', partial: 'only a fragment stored (paywall or script-rendered page)', blocked: 'the site refused the request or the page is gone', failed: 'fetching the text failed',
+// the morgue's modes: [label, what gets filed]
+const MORGUE_MODES = {
+  auto: ['AUTO', 'every article that appears in the live feeds is filed, plus anything opened in the reader or saved to a binder'],
+  adhoc: ['AD-HOC', 'articles are filed when someone opens them in the reader or saves them to a binder'],
+  manual: ['MANUAL', "only what's saved to a binder, or filed by hand (right-click → File in the morgue)"],
+  fragment: ['FRAGMENT', 'like manual, but filed as fragments: headline and summary only — no pages are fetched'],
+};
+// what the morgue is (the DETAILS heading's tooltip)
+const MORGUE_HELP = "Newsrooms call their archive of clippings “the morgue”. STRINGER keeps one: an article's text is fetched once, cleaned up for the reader and filed here under a morgue no. — so it stays readable and searchable (body:, author:, words:) after the page changes, goes behind a paywall or disappears. Articles are filed automatically as they appear in the feeds (the auto-filer), or when someone opens an unfiled one in the reader or saves it to a binder — who did is shown as “filed by”.";
+const BODY_STATUS = { ok: 'in the morgue', partial: 'only a fragment filed (paywall or script-rendered page)', blocked: 'the site refused the request or the page is gone', failed: 'fetching the text failed',
   fragment: 'filed as a fragment — headline and summary only; reading it fetches the full text' };
 let artOpen = null;          // { idx, a, data, err }
 
@@ -1310,16 +1323,17 @@ function renderDetails(slot) {
   const stories = d.stories || [];
   slot.innerHTML = `
     <div class="dt-sec"><h4>THE ARTICLE</h4>
-      ${s ? row('outlet', `${chip(s.bias)} ${esc(s.name)} <span class="dim">· ${esc(BIAS_NAME[s.bias].toLowerCase())} · ${s.type === 'legacy' ? 'legacy' : 'new'} media</span>`) : ''}
+      ${s ? row('outlet', `${chip(s.bias)} ${esc(s.name)} <span class="dim">· ${s.type === 'legacy' ? 'legacy' : 'new'} media</span>`) : ''}
+      ${b?.byline ? row('byline', esc(b.byline)) : ''}
       ${pub ? row('published', `${esc(fmtTime(pub))} <span class="dim">· ${relAge(pub)}</span>`) : ''}
-      ${auth.me?.user ? row('you', readBadge(art).trim() || '—') : ''}
+      ${auth.me?.user ? row('status', readBadge(art).trim() || '—') : ''}
       ${row('link', `<span class="dim dt-link" title="${esc(d.link)}">${esc(d.link.replace(/^https?:\/\/(www\.)?/, '').slice(0, 60))}${d.link.length > 70 ? '…' : ''}</span>`)}
       ${d.archived ? row('indexed via', `${esc(ORIGIN_NAME[d.archived.origin] || d.archived.origin)}${d.archived.quality < 2 ? ' <span class="dim">· headline rebuilt from the URL</span>' : ''}`) : ''}
     </div>
-    <div class="dt-sec"><h4>THE MORGUE</h4>
+    <div class="dt-sec"><h4><span class="dt-help" title="${esc(MORGUE_HELP)}" data-tip-head="THE MORGUE">THE MORGUE</span></h4>
       ${b?.morgue ? `${row('morgue no.', morgueBadge({ morgue: b.morgue, words: b.words, saved: b.fetched, partial: b.status === 'partial', fragment: b.status !== 'ok' && b.status !== 'partial' }))}
         ${row('words', `${(b.words || 0).toLocaleString()}${b.status === 'partial' ? ' <span class="warn">· fragment</span>' : ''}`)}
-        ${b.byline ? row('byline', esc(b.byline)) : ''}${b.fetched ? row('filed', esc(isoDay(b.fetched))) : ''}`
+        ${b.fetched ? row('filed', esc(isoDay(b.fetched))) : ''}${row('filed by', b.filedBy ? esc(b.filedBy) : '<span class="dim">not recorded (filed before STRINGER tracked it)</span>')}`
         : `<div class="dim small">${b ? 'couldn\'t be filed — the site refused or the page is gone' : 'not in the morgue yet'}</div>`}
     </div>
     <div class="dt-sec"><h4>STORIES <span class="dim">· ${stories.length}</span></h4>
@@ -1427,7 +1441,7 @@ function renderArticleModal() {
         ? `${morgue ? morgueBadge({ morgue, words, saved: body?.fetched || ft?.saved, partial: body?.status === 'partial' || ft?.partial }, { big: true }) : '<span class="ft big">▣ MORGUE</span>'} <b>${words.toLocaleString()}</b> words${body?.byline ? ` · by ${esc(body.byline)}` : ''}${body?.fetched ? ` · saved ${esc(isoDay(body.fetched))}` : ''}${body?.status === 'partial' ? ' · <span class="warn">fragment only</span>' : ''} — <button type="button" class="link" data-act="read">[read it ⏎]</button>
           `
         : body ? `${body.morgue ? `${morgueBadge({ morgue: body.morgue, words: 0, saved: body.fetched, fragment: true }, { big: true })} ` : ''}<span class="dim">${esc(BODY_STATUS[body.status] || body.status)}</span> — <button type="button" class="link" data-act="read">[try the reader ⏎]</button>`
-        : `<span class="dim">not in the morgue yet — reading it fetches the text (or the Wayback Machine copy if the page is gone or the site won't serve it), saves it and files it in the morgue with a morgue no.${d.approx ? ', and replaces the rebuilt ≈ headline with the real one' : ''}.</span> <button type="button" class="link" data-act="read">[read it ⏎]</button>`}</div>
+        : `<span class="dim">not in the morgue yet — reading it fetches the text (or the Wayback Machine copy if the page is gone or the site won't serve it) and files it in the morgue with a morgue no.${d.approx ? ', and replaces the rebuilt ≈ headline with the real one' : ''}.</span> <button type="button" class="link" data-act="read">[read it ⏎]</button>`}</div>
     </section>
 
     <section>
@@ -2043,6 +2057,7 @@ function openQueryDialog(sq = null) {
   $('#dq-name').value = sq ? sq.name : '';
   $('#dq-pinned').checked = sq ? sq.pinned : true;
   $('#dq-view').checked = !!sq?.view;
+  $('#dq-highlight').checked = sq ? sq.highlight !== false : true;
   $('#dq-view-desc').textContent = sq?.view ? `(${sq.view.mode} · ${sq.view.sort} → now ${viewDesc().slice(1)}` : viewDesc();
   $('#dq-error').hidden = true;
   checkDialogQuery();
@@ -2058,6 +2073,7 @@ qForm.addEventListener('submit', async (e) => {
   const body = {
     name: $('#dq-name').value, query: $('#dq-query').value, pinned: $('#dq-pinned').checked,
     view: $('#dq-view').checked ? { mode: state.mode, sort: state.sort } : null,
+    highlight: $('#dq-highlight').checked,
   };
   try {
     const sq = qEditing
@@ -2563,6 +2579,7 @@ const COMMANDS = [
   ['unpin', '<saved>', 'remove from tab bar'], ['unsave', '<saved>', 'delete a saved query'],
   ['advanced', '', 'open the advanced query editor'], ['stats', '', 'summary & charts for the current query'], ['archive', '[open|start|pause]', 'historical archive / backfill'],
   ['clear', '', 'clear console'],
+  ['log', '[n|all|kind|words|clear]', 'your activity history: opened, searched, saved, marked'], ['history', '[n|all|kind|words|clear]', 'same as log'],
   ...setCmds.commands,
 ];
 const SOURCE_CMDS = new Set(['up', 'down', '+', '-', 'solo', 'only', 'on', 'off', 'enable', 'disable', 'edit']);
@@ -2580,7 +2597,11 @@ const ARG_LISTS = {
   ticker: [['on', ''], ['off', ''], ['stop', 'still; scroll it by hand'], ['slow', 'scroll speed'], ['medium', 'scroll speed'], ['fast', 'scroll speed']],
   blindspot: [['min', 'min sources for a blindspot']],
   help: [['query', 'query syntax'], ['settings', 'settings commands']],
+  // (activity kinds: the names `log` filters by)
+  log: [['all', 'everything kept (up to 1,000)'], ['50', 'the last 50'], ['story', 'stories opened'], ['read', 'articles read'], ['archive', 'archive views'], ['query', 'searches'],
+    ['save', 'saved to the binder'], ['quote', 'quotes saved'], ['note', 'notes'], ['mark', 'marked read / unread'], ['vote', 'outlet votes'], ['remove', 'removed from the binder'], ['clear', 'forget the history']],
 };
+ARG_LISTS.history = ARG_LISTS.log;
 
 function terminalProvider(v, caret, force) {
   if (!v.trim() && !force) return null;
@@ -2703,7 +2724,7 @@ document.addEventListener('keydown', (e) => {
 
 // ───────────────────────── advanced query editor ─────────────────────────
 reader = createReader({ esc, chip, srcById, safeUrl, api, store, onRead: noteRead, log: (m, c) => log(m, c),
-  queryRegexes: () => hlRegs().body,
+  queryRegexes: () => (hlMuted() ? [] : hlRegs().body),
   onOpen: (a) => activity.record('read', `read: ${a.title || a.link} — ${srcById(a.sourceId)?.name || ''}`, { link: a.link, title: a.title, sourceId: a.sourceId, date: a.date }),
   readState: { signedIn: () => !!auth.me?.user, isRead: (link) => !!state.readLinks?.has(link), toggle: (a) => setRead(a, !state.readLinks?.has(a.link)) },
   discussion: { aside: cmAside, collapsed: cmCollapsed, toggle: toggleComments, toggleDetails, pane: paneAttr, place: () => { placeCmTabs(); requestAnimationFrame(placeCmTabs); },
@@ -2801,7 +2822,7 @@ function contextAt(node) {
 }
 const research = createResearch({ api, esc, chip, srcById, log: (m, c) => log(m, c), auth, store, fmtTime, agoText: (t) => agoText(t),
   openStoryBySid, reader, queryError, setQuery: (q) => { state.tabId = null; return setQuery(q); }, mainQuery: () => qInput.value,
-  attachAutocomplete, suggest, acCtx, asArticle, contextAt, highlight: highlightHTML, articleTip: (a, o) => articleTip(a, o), onMorgue: (l, no) => noteMorgue(l, no), activity: (k, x, r) => activity.record(k, x, r), onQueryEdit: (q) => mirrorQuery('builder', q) });
+  attachAutocomplete, suggest, acCtx, asArticle, contextAt, highlight: highlightHTML, articleTip: (a, o) => articleTip(a, o), onMorgue: (l, no) => noteMorgue(l, no), morgueOf: (a) => (a?.id != null && state.fulltext?.[a.id]?.morgue) || a?.morgue || null, activity: (k, x, r) => activity.record(k, x, r), onQueryEdit: (q) => mirrorQuery('builder', q) });
 queryMirrors.builder = research.builder.setText;
 $('#q-binder')?.addEventListener('click', () => research.open());
 // b: the binder · q: the query builder (anywhere, popovers included; not while typing)
@@ -2900,12 +2921,14 @@ function archiveShell() {
         <button type="button" data-act="start" id="ar-start" class="needs-perm-archive-manage">START</button>
         <button type="button" data-act="pause" id="ar-pause" class="needs-perm-archive-manage">PAUSE</button>
         <span class="dim small" id="ar-active"></span></div>
-      <div class="ar-ctl">morgue <b id="ft-state">—</b> · <b id="ft-total">—</b> articles filed (<span id="ft-words">—</span> words) · <span id="ft-day">—</span> in 24h
-        <button type="button" data-act="ft-start" id="ft-start" class="needs-perm-archive-manage">START</button>
-        <button type="button" data-act="ft-pause" id="ft-pause" class="needs-perm-archive-manage">PAUSE</button>
+      <div class="ar-ctl">morgue <b id="ft-state">—</b> · <b id="ft-total">—</b> articles filed<span id="ft-frags" class="dim" title="headline and summary only"></span> (<span id="ft-words">—</span> words) · <span id="ft-day">—</span> in 24h
+        <span class="ft-modes needs-perm-archive-manage">${Object.entries(MORGUE_MODES).map(([k, [l, d]]) => `<button type="button" data-act="ft-mode" data-mode="${k}" title="${esc(d)}">${l}</button>`).join('')}</span>
         <span class="dim small" id="ft-queue"></span></div>
+      <div class="ar-ctl dim small" id="ft-mode-desc"></div>
+      <label class="ar-ctl small chk needs-perm-archive-manage" title="each article's headline and summary get a morgue no. as they arrive from the feeds — a record of good headlines and summaries even when the text is never fetched (in auto and ad-hoc mode the full text replaces it later, keeping the number)"><input type="checkbox" id="ft-fragall" /> also file every incoming headline + summary as a fragment</label>
+      <div class="ar-ctl small" id="ft-filers"></div>
       <div class="ar-ctl" id="ar-disk"></div>
-      <div class="dim small">the morgue: every article that appears in the live feeds is fetched once, run through the reader-view extraction and filed in the STRINGER morgue under a morgue no. — its text is indexed for <b>body:</b> / <b>author:</b> / <b>words:</b> / <b>morgue:</b> queries, and the reader opens the morgue copy. Sites that refuse requests (HTTP 401/403) are skipped.</div>
+      <div class="dim small">the morgue: articles are fetched once, run through the reader-view extraction and filed in the STRINGER morgue under a morgue no. — its text is indexed for <b>body:</b> / <b>author:</b> / <b>words:</b> / <b>morgue:</b> queries, and the reader opens the morgue copy. The mode decides what gets filed (hover the buttons); in every mode a binder save files the article, right-click → <b>File in the morgue</b> files any article, and removing something from a binder never unfiles it. Fragments are headline + summary only. Sites that refuse requests (HTTP 401/403) are left alone; their articles are filed from the Wayback Machine's copy once it has one.</div>
       <div class="dim small">sources: outlet sitemaps (headlines rebuilt from URLs, shown with ≈) · Wayback Machine snapshots of each RSS feed (real headlines, sampled monthly → weekly → daily) · live feeds · Hacker News API. Blocked outlets fill from the Wayback Machine only.</div>
     </div>
     <div class="ar-table-wrap"><table class="ar-table">
@@ -2931,15 +2954,29 @@ function renderArchive(a) {
   const ft = a.fulltext;
   if (ft) {
     const h = ft.harvester || {};
-    $('#ft-state').textContent = h.running ? 'RUNNING' : 'PAUSED';
-    $('#ft-state').className = h.running ? 'ok' : 'warn';
+    const mm = MORGUE_MODES[h.mode] ? h.mode : 'auto';
+    $('#ft-state').textContent = MORGUE_MODES[mm][0];
+    $('#ft-state').className = mm === 'auto' ? 'ok' : 'warn';
+    $('#ft-state').title = MORGUE_MODES[mm][1];
+    for (const b of $$('.ft-modes [data-mode]')) b.classList.toggle('on', b.dataset.mode === mm);
+    $('#ft-mode-desc').textContent = MORGUE_MODES[mm][1];
+    $('#ft-fragall').checked = h.fragmentAll !== false;
     $('#ft-total').textContent = ((ft.ok || 0) + (ft.partial || 0)).toLocaleString();
+    $('#ft-frags').textContent = ft.fragment ? ` + ${ft.fragment.toLocaleString()} fragments` : '';
     $('#ft-words').textContent = fmtN(ft.words || 0);
     $('#ft-day').textContent = (ft.lastDay ?? 0).toLocaleString();
-    $('#ft-start').hidden = !!h.running;
-    $('#ft-pause').hidden = !h.running;
+    // who filed what: opening an unfiled article in the reader (or saving it to a binder) files it in your name;
+    // the rest is the auto-filer's
+    const fl = ft.filers || [];
+    $('#ft-filers').innerHTML = fl.length ? `<span class="dim">filed by</span> ${fl.slice(0, 8).map((f) => `<span title="${esc(f.auto ? 'fetched and filed automatically as articles appear in the feeds' : f.untracked ? 'filed before STRINGER recorded who filed what' : 'filed when they opened it in the reader or saved it to a binder')}">${f.untracked ? '<span class="dim">' : f.auto ? '' : '<b>'}${esc(f.name)}${f.untracked ? '</span>' : f.auto ? '' : '</b>'} <span class="dim">${f.n.toLocaleString()}</span></span>`).join(' · ')}${fl.length > 8 ? ` <span class="dim">· +${fl.length - 8} more</span>` : ''}` : '';
     $('#ft-queue').textContent = h.running ? `· ${h.queued || 0} queued${h.active ? `, ${h.active} fetching` : ''}${h.cooling?.length ? ` · ${h.cooling.length} sites resting` : ''}` : '';
-    $('#ft-queue').title = h.cooling?.length ? `these sites refused several requests in a row (HTTP 401/403), so they are left alone for 6h:\n${h.cooling.map((c) => c.host).join(', ')}` : '';
+    {
+      const sites = (h.cooling || []).filter((c) => c.host !== 'web.archive.org'), wb = (h.cooling || []).find((c) => c.host === 'web.archive.org');
+      $('#ft-queue').title = [
+        sites.length ? `these sites refused several requests in a row (HTTP 401/403), so they are left alone for 6h — their articles are filed from the Wayback Machine's copy once it has one:\n${sites.map((c) => c.host).join(', ')}` : '',
+        wb ? `Wayback Machine lookups are paused until ${new Date(wb.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} (it was unavailable or asked us to slow down)` : '',
+      ].filter(Boolean).join('\n\n');
+    }
   } else $('#ft-state').textContent = 'off';
   const dk = a.disk;
   if (dk) {
@@ -2980,14 +3017,22 @@ async function openArchive() {
   await loadArchiveStatus();
 }
 $('#btn-archive').addEventListener('click', openArchive);
+arDlg.addEventListener('change', async (e) => {
+  if (e.target.id !== 'ft-fragall') return;
+  const on = e.target.checked;
+  try { await api('archive', { method: 'POST', body: { action: 'fragment-all', on } }); log(`morgue: every incoming headline + summary ${on ? 'is filed as a fragment' : 'is no longer filed on arrival'}`, 'ok'); }
+  catch (err) { log(`couldn't change it: ${esc(err.message)}`, 'err'); }
+  loadArchiveStatus();
+});
 arDlg.addEventListener('click', async (e) => {
   if (e.target === arDlg) return arDlg.close();
   const act = e.target.closest('[data-act]')?.dataset.act;
   if (act === 'close') arDlg.close();
   else if (act === 'pause') { await api('archive', { method: 'POST', body: { action: 'pause' } }); log('backfill paused', 'warn'); loadArchiveStatus(); }
-  else if (act === 'ft-start' || act === 'ft-pause') {
-    await api('archive', { method: 'POST', body: { action: act === 'ft-start' ? 'fulltext-start' : 'fulltext-pause' } });
-    log(`morgue filing ${act === 'ft-start' ? 'running' : 'paused'}`, act === 'ft-start' ? 'ok' : 'warn');
+  else if (act === 'ft-mode') {
+    const mode = e.target.closest('[data-mode]').dataset.mode;
+    try { await api('archive', { method: 'POST', body: { action: 'morgue-mode', mode } }); log(`morgue mode → <b>${MORGUE_MODES[mode][0]}</b> <span class="dim">· ${esc(MORGUE_MODES[mode][1])}</span>`, 'ok'); }
+    catch (err) { log(`couldn't change the morgue mode: ${esc(err.message)}`, 'err'); }
     loadArchiveStatus();
   }
   else if (act === 'start') {

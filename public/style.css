@@ -498,6 +498,11 @@ dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(2px); }
 .ar-summary { display: grid; gap: 6px; font-size: 12px; }
 .ar-summary .big { font-size: 18px; color: var(--fg2); }
 .ar-ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ft-modes { display: inline-flex; }
+.ft-modes button { background: transparent; border: 1px solid var(--line); color: var(--fg2); font: inherit; font-size: 11px; letter-spacing: .06em; padding: 2px 8px; cursor: pointer; }
+.ft-modes button + button { border-left: 0; }
+.ft-modes button.on { border-color: var(--fg); color: var(--fg); background: var(--bg3); }
+.ft-modes button.on + button { border-left: 1px solid var(--line); }
 .ar-ctl input { background: var(--bg2); border: 1px solid var(--line); color: var(--fg); padding: 2px 6px; color-scheme: dark; }
 .small { font-size: 11px; }
 .ar-table-wrap { max-height: 60vh; overflow-y: auto; border: 1px solid var(--line); }
@@ -1044,6 +1049,12 @@ body.no-perm-comments-read .pop-split { grid-template-columns: minmax(0, 1fr); }
 .pop-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
 .pop-tabs .pop-cm-rail { border-bottom: 0; margin: 0; padding: 0 10px 8px 0; }
 .pop-tabs .pop-info-rail { padding-left: 10px; border-left: 1px solid var(--line); }
+/* each tab on one line (the reader's sidebar column is narrower than the popovers': a wrapped label sat under its icon) */
+.pop-split:not(.collapsed) .pop-tabs .pop-cm-rail { white-space: nowrap; min-width: 0; flex: 0 1 auto; }
+.pop-split:not(.collapsed) .pop-tabs .pop-cm-rail-l { overflow: hidden; text-overflow: ellipsis; }
+#dlg-reader .pop-split:not(.collapsed) .pop-tabs .pop-cm-rail { letter-spacing: .05em; font-size: 11px; }
+#dlg-reader .pop-split:not(.collapsed) .pop-tabs .pop-cm-rail:first-child { padding-right: 8px; }
+#dlg-reader .pop-split:not(.collapsed) .pop-tabs .pop-info-rail { padding-left: 8px; }
 .pop-split:not(.collapsed)[data-pane=discussion] .pop-info-rail .pop-cm-rail-l,
 .pop-split:not(.collapsed)[data-pane=details] .pop-cm-rail:not(.pop-info-rail) .pop-cm-rail-l { color: var(--dim); font-weight: 600; }
 .pop-split:not(.collapsed) .pop-tabs .pop-cm-arrow { display: none; }
@@ -1055,6 +1066,7 @@ body.no-perm-comments-read .pop-split { grid-template-columns: minmax(0, 1fr); }
 /* details pane */
 .dt-sec { margin-bottom: 16px; }
 .dt-sec h4 { margin: 0 0 6px; font-size: 11.5px; letter-spacing: .1em; color: var(--fg); }
+.dt-help { cursor: help; border-bottom: 1px dotted var(--dim); }
 .dt-row { display: grid; grid-template-columns: 82px 1fr; gap: 8px; font-size: 12px; padding: 2px 0; }
 .dt-k { color: var(--dim); }
 .dt-v { min-width: 0; overflow-wrap: anywhere; }
@@ -1169,7 +1181,6 @@ body.signed-in.no-perm-binder-use .needs-perm-binder-use { display: none !import
 .bd-quote { margin: 2px 0; padding: 6px 12px; border-left: 3px solid var(--warn); font-size: 14px; line-height: 1.55; color: var(--fg); white-space: pre-wrap; }
 .bd-title { font-size: 13px; }
 .bd-open { text-align: left; font-weight: 700; color: var(--fg); }
-.bd-note { font-size: 12px; color: var(--fg2); font-style: italic; white-space: pre-wrap; }
 .bd-note-edit textarea { width: 100%; min-height: 70px; background: var(--bg); border: 1px solid var(--line); color: var(--fg); font: inherit; font-size: 12.5px; padding: 6px; resize: vertical; }
 .bd-acts { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 12px; }
 .bd-acts button:not(.link) { background: transparent; border: 1px solid var(--dim); color: var(--fg); font: inherit; font-size: 12px; padding: 2px 10px; cursor: pointer; }
@@ -1284,6 +1295,38 @@ body > .qb .qb-bs-tab { display: none; }          /* on the main page the binder
 .note-acts .dim { flex: 1; }
 .note-save { background: transparent; border: 1px solid var(--dim); color: var(--fg); font: inherit; font-size: 12px; padding: 1px 10px; cursor: pointer; }
 .note-save:hover { border-color: var(--fg); }
+/* notes: a list, like private comments — each with its time (and author, in a shared binder) */
+.note-list { display: grid; gap: 10px; margin-bottom: 8px; }
+.note-item .note-meta { display: flex; gap: 4px; align-items: baseline; margin-bottom: 2px; }
+.note-item .note-meta .note-acts { margin: 0 0 0 auto; display: inline-flex; gap: 4px; font-size: 11px; }
+.note-item .note-text { margin-bottom: 0; }
+/* the binder: notes, the tools row, sharing */
+.bd-note-text { white-space: pre-wrap; font-size: 13.5px; line-height: 1.55; color: var(--fg); border-left: 3px solid var(--fg2); padding: 4px 12px; overflow-wrap: anywhere; }
+.bd-tools { margin-left: auto; display: inline-flex; gap: 10px; align-items: center; font-size: 12px; }
+.bd-tabs .bd-tools button { border: 0; padding: 0; background: none; }
+.bd-compose, .bd-share { border: 1px solid var(--line); padding: 10px 12px; margin-top: 10px; display: grid; gap: 8px; }
+.bd-compose textarea { width: 100%; box-sizing: border-box; min-height: 80px; background: var(--bg2); border: 1px solid var(--line); color: var(--fg); font: inherit; font-size: 13px; padding: 6px; resize: vertical; }
+.bd-compose textarea:focus, .bd-share input:focus { outline: none; border-color: var(--fg); }
+.bd-compose .bd-acts { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
+.bd-compose .bd-acts .dim { margin-right: auto; }
+.bd-share-h { font-size: 12px; letter-spacing: .08em; font-weight: 700; }
+.bd-share-row { display: flex; gap: 10px; align-items: center; font-size: 13px; }
+.bd-share-row > span { flex: 1; }
+.bd-share-add { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.bd-share input { background: var(--bg2); border: 1px solid var(--line); color: var(--fg); font: inherit; font-size: 13px; padding: 3px 8px; width: 160px; }
+.bd-link-edit { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0 2px; }
+.bd-link-edit input { flex: 1; min-width: 240px; background: var(--bg2); border: 1px solid var(--line); color: var(--fg); font: inherit; font-size: 13px; padding: 3px 8px; }
+.bd-link-edit input:focus { outline: none; border-color: var(--fg); }
+.bd-link-edit button:not(.link) { background: transparent; border: 1px solid var(--dim); color: var(--fg); font: inherit; font-size: 12px; padding: 2px 10px; cursor: pointer; }
+.bd-link-edit .err { flex-basis: 100%; }
+.bd-seg { display: inline-flex; }
+.bd-seg button { background: transparent; border: 1px solid var(--line); color: var(--fg2); font: inherit; font-size: 11.5px; padding: 2px 8px; cursor: pointer; }
+.bd-seg button + button { border-left: 0; }
+.bd-seg button.on { border-color: var(--fg); color: var(--fg); background: var(--bg3); }
+.bd-seg button.on + button { border-left: 1px solid var(--line); }
+.bd-share button:not(.link) { background: transparent; border: 1px solid var(--dim); color: var(--fg); font: inherit; font-size: 12px; padding: 2px 10px; cursor: pointer; }
+.bd-book.shared button:first-child { font-style: italic; }
+.bs-foot { display: flex; justify-content: space-between; gap: 8px; align-items: center; white-space: nowrap; }
 
 /* password fields: asterisks drawn over the real (transparent-masked) input — see pwmask.js */
 .pwm { position: relative; display: block; }
@@ -1320,7 +1363,6 @@ body.bside-open { --rw: 280px; }
 .bs-title { background: none; border: 0; padding: 0; text-align: left; color: var(--fg2); font: inherit; font-size: 12px; line-height: 1.4; cursor: pointer;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .bs-title:hover { color: var(--fg); text-decoration: underline; }
-.bs-note { font-size: 11px; color: var(--dim); font-style: italic; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .bs-empty { padding: 18px 12px; font-size: 12px; line-height: 1.5; }
 .bs-foot { border-top: 1px solid var(--line); padding: 7px 10px; font-size: 12px; }
 .binder-side.bs-drop { outline: 1px dashed var(--warn); outline-offset: -4px; background: color-mix(in srgb, var(--warn) 6%, var(--bg2)); }

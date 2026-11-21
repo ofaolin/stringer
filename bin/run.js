@@ -8,7 +8,8 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 let child = null, stopping = false, restarts = [];
 
 function start() {
-  child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', path.join(root, 'server.js')], { stdio: 'inherit', cwd: root, env: process.env });
+  // --enable-experimental-regexp-engine: regex query terms run on V8's linear-time engine (see public/query.js)
+  child = spawn(process.execPath, ['--disable-warning=ExperimentalWarning', '--enable-experimental-regexp-engine', path.join(root, 'server.js')], { stdio: 'inherit', cwd: root, env: process.env });
   child.on('exit', (code, signal) => {
     if (stopping) return process.exit(code ?? 0);
     const now = Date.now();

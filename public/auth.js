@@ -155,11 +155,11 @@ export function createAuth(ctx) {
     const d = dialog('dlg-setup', 'wide-dlg setup-dlg');
     const fresh = !info.sources.some((s) => s.enabled);
     const picked = new Set(info.sources.filter((s) => fresh || s.enabled).map((s) => s.id));
-    const form = { siteName: me.site.siteName, username: 'admin', display: '', email: '', password: '', password2: '',
+    const form = { token: '', siteName: me.site.siteName, username: 'admin', display: '', email: '', password: '', password2: '',
       // an upgraded server keeps its current archive settings; a new one suggests building the archive
       backfill: info.archive?.total > 0 ? !!info.archive.backfill?.running : true,
       since: info.archive?.backfill?.since ? new Date(info.archive.backfill.since).toISOString().slice(0, 10) : '2015-01-01',
-      fulltext: info.archive ? info.archive.fulltext !== false : true, guestAccess: true, rankMode: 'community' };
+      morgueMode: info.archive?.morgueMode || 'fragment', fragmentAll: info.archive ? info.archive.fragmentAll !== false : true, guestAccess: true, rankMode: 'community' };
     let step = 0, err = '';
     // outlets the admin adds that aren't in the default list: { id, name, feed, site, bias, type }
     const custom = [];
@@ -168,11 +168,14 @@ export function createAuth(ctx) {
     const grab = () => {
       for (const el of d.querySelectorAll('[data-f]')) form[el.dataset.f] = el.type === 'checkbox' ? el.checked : el.value;
       for (const el of d.querySelectorAll('[data-src]')) el.checked ? picked.add(el.dataset.src) : picked.delete(el.dataset.src);
+      const mm = d.querySelector('[data-morgue-mode]:checked');
+      if (mm) form.morgueMode = mm.value;
     };
     const render = () => {
       const groups = [-2, -1, 0, 1, 2].map((b) => [b, info.sources.filter((s) => s.bias === b)]);
       const body = step === 0 ? `
           <p class="dim">Welcome. This server isn't set up yet — you're creating its first account, which will be the admin.</p>
+          <label class="field"><span>setup code <span class="dim">— printed in the server's log when it started (also in data/setup-token.txt)</span></span><input data-f="token" value="${esc(form.token)}" autocomplete="off" spellcheck="false" /></label>
           <label class="field"><span>site name</span><input data-f="siteName" value="${esc(form.siteName)}" maxlength="40" /></label>
           <div class="row2">
             <label class="field"><span>admin username</span><input data-f="username" value="${esc(form.username)}" autocomplete="username" spellcheck="false" /></label>
@@ -215,7 +218,8 @@ export function createAuth(ctx) {
           <label class="chk"><input type="checkbox" data-f="backfill" ${form.backfill ? 'checked' : ''} /> build the historical archive in the background, back to
             <input data-f="since" type="date" value="${esc(form.since)}" min="1990-01-01" /></label>
           <div class="dim small indent">crawls outlet sitemaps, Wayback Machine snapshots of their feeds and Hacker News. It's polite, so it takes hours to days, and the archive can grow to 10+ GB.${info.archive?.total ? ` The archive already holds ${info.archive.total.toLocaleString()} articles.` : ''}</div>
-          <label class="chk"><input type="checkbox" data-f="fulltext" ${form.fulltext ? 'checked' : ''} /> save the full text of live-feed articles to the morgue <span class="dim">(searchable with body:, readable after pages die)</span></label>
+          <div class="field"><span>the morgue — what gets filed</span><div class="row2 morgue-modes">${[['auto', 'AUTO', 'every live-feed article'], ['adhoc', 'AD-HOC', 'what people open in the reader or save to a binder'], ['manual', 'MANUAL', 'only binder saves and right-click → File in the morgue'], ['fragment', 'FRAGMENT', 'like manual, headline + summary only']].map(([k, l, d]) => `<label class="chk"><input type="radio" name="morgueMode" value="${k}" ${form.morgueMode === k ? 'checked' : ''} data-morgue-mode /> ${l} <span class="dim">— ${d}</span></label>`).join('')}</div>
+            <label class="chk"><input type="checkbox" data-f="fragmentAll" ${form.fragmentAll ? 'checked' : ''} /> also file every incoming headline + summary as a fragment <span class="dim">(builds a record of headlines and summaries in any mode)</span></label></div>
           <label class="chk"><input type="checkbox" data-f="guestAccess" ${form.guestAccess ? 'checked' : ''} /> let visitors read without signing in <span class="dim">(they can't vote, comment or save tabs)</span></label>
           <div class="field"><span>default ranking</span><div class="bias-pick">
             <label><input type="radio" name="rm" data-rm="community" ${form.rankMode === 'community' ? 'checked' : ''} />COMMUNITY</label>
@@ -258,7 +262,7 @@ export function createAuth(ctx) {
         if (!q) return;
         addBusy = true; addMsg = ''; found = { query: q }; render();
         try {
-          const r = await api('setup/discover', { method: 'POST', body: { url: q } });
+          const r = await api('setup/discover', { method: 'POST', body: { url: q, token: form.token } });
           if (custom.some((c) => c.feed === r.feed) || info.sources.some((s) => s.feed === r.feed)) { addMsg = '✗ that feed is already in the list'; found = { query: q }; }
           else found = { ...r, query: q, name: (r.title || '').split(/\s[|\-–—:]\s/)[0].slice(0, 80), bias: null, type: 'new' };
         } catch (ex) { addMsg = `✗ ${ex.message}`; found = { query: q }; }
@@ -282,15 +286,18 @@ export function createAuth(ctx) {
         else if (form.password.length < 8) err = 'the password needs at least 8 characters';
         else if (form.password !== form.password2) err = "the passwords don't match";
         if (err) return render();
+        // the setup code first, so a wrong one is caught now rather than after the last step
+        try { await api('setup/check', { method: 'POST', body: { token: form.token } }); }
+        catch (ex) { err = ex.message; return render(); }
       }
       if (step === 1 && !picked.size && !custom.length) { err = 'pick at least one outlet'; return render(); }
       if (step < 2) { step++; return render(); }
       const btn = e.target.closest('button'); btn.disabled = true; btn.textContent = 'SETTING UP…';
       try {
-        me = await api('setup', { method: 'POST', body: { siteName: form.siteName, admin: { username: form.username, display: form.display || form.username, email: form.email, password: form.password },
-          sources: [...picked], custom: custom.map(({ id, ...c }) => c), backfill: { enabled: form.backfill, since: form.since }, fulltext: form.fulltext, guestAccess: form.guestAccess, rankMode: form.rankMode } });
+        me = await api('setup', { method: 'POST', body: { token: form.token, siteName: form.siteName, admin: { username: form.username, display: form.display || form.username, email: form.email, password: form.password },
+          sources: [...picked], custom: custom.map(({ id, ...c }) => c), backfill: { enabled: form.backfill, since: form.since }, morgueMode: form.morgueMode, fragmentAll: form.fragmentAll, guestAccess: form.guestAccess, rankMode: form.rankMode } });
         location.reload();
-      } catch (ex) { err = ex.message; render(); }
+      } catch (ex) { err = ex.message; if (ex.data?.setupCode) step = 0; render(); }    // (the server restarted: a new code)
     });
     render();
     d.showModal();

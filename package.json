@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "start": "node bin/run.js",
-    "serve": "node --disable-warning=ExperimentalWarning server.js"
+    "serve": "node --disable-warning=ExperimentalWarning --enable-experimental-regexp-engine server.js"
   },
   "engines": {
     "node": ">=22.13"

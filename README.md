@@ -18,9 +18,11 @@ or by hand:
 docker build -t stringer .
 docker run -d --name stringer -p 1337:1337 -v stringer-data:/data --restart unless-stopped stringer
 ```
-Open the site and the **setup wizard** runs: create the admin account, pick which outlets the server follows
+Open the site and the **setup wizard** runs. It first asks for the **setup code** the server prints in its log
+when it starts unconfigured (`docker compose logs stringer`; also in `setup-token.txt` in the data directory) —
+so only whoever runs the server can claim it. Then: create the admin account, pick which outlets the server follows
 (and add any that aren't in the default list — paste a site or feed URL, it finds the feed, you name and rate it),
-and choose whether to build the historical archive (back to a year you pick), save article text to the morgue,
+and choose whether to build the historical archive (back to a year you pick), file article text in the morgue,
 let visitors read without signing in, and which ranking is the default. Everything the server keeps — outlets,
 accounts, the archive — lives in `/data` (mount a volume; the archive can grow past 10 GB with the backfill).
 
@@ -42,17 +44,27 @@ HOST=0.0.0.0 npm start    # listen on every interface (put a TLS reverse proxy i
 | `OIDC_LABEL`, `OIDC_SCOPES` | `Sign in with SSO`, `openid profile email` | |
 | `OIDC_ADMIN_GROUP` | — | members of this group (in the `groups` claim) become admins |
 | `LOCAL_LOGIN` | `true` | `false` = SSO only |
-| `BACKFILL` / `FULLTEXT` | on | `0` disables the archive crawl / saving article text |
+| `BACKFILL` | on | `0` disables the archive crawl |
+| `FULLTEXT` | `fragment` (new servers) | the morgue's starting mode — `auto`, `adhoc` (also `0`), `manual` or `fragment`; once chosen in the archive panel, that choice is kept |
 | `REFRESH_MIN` | `10` | minutes between feed syncs |
+| `STRINGER_SETUP_TOKEN` | random | use this setup code instead of a generated one (only matters before setup) |
+| `STRINGER_ALLOW_PRIVATE_FETCH` | off | `1` lets the reader and feed fetcher reach private / local addresses (e.g. a feed on your LAN). Off, they only fetch public addresses, re-checking every redirect, so links can't be used to probe your network |
 
 Behind a reverse proxy, forward `X-Forwarded-Proto` (session cookies are marked `Secure` over https) or set `BASE_URL`.
+
+**Security notes.** Failed sign-ins back off (per address and per username; `429` with `Retry-After`), and so do
+setup-code guesses and repeated sign-ups. Changing a password signs the account out everywhere else; an admin
+resetting it signs that user out everywhere. Pages can't be framed by other sites. Regex query terms run on
+V8's linear-time engine (`npm start` and the Docker image pass `--enable-experimental-regexp-engine`), so no
+pattern can stall the server; without that flag, regex terms are refused rather than run unsafely.
 
 ## Accounts, permissions & sign-in
 - **Sign-in:** username + password accounts, and/or **OpenID Connect** single sign-on with any provider (Authentik,
   Authelia, Keycloak, Zitadel, Google, Microsoft Entra…). Admin panel → SINGLE SIGN-ON shows the redirect URI to
   register (`<public URL>/auth/oidc/callback`); new SSO users can get an account automatically, and a
   `group = role` mapping (from the `groups` claim, or any claim you name) sets their role at every sign-in. An
-  existing account with the same *verified* email is linked on first SSO sign-in. ID tokens are verified against
+  existing account with the same *verified* email is linked on first SSO sign-in — only if an admin (or the setup
+  wizard) set that account's email; an email typed in at self-sign-up is never trusted for linking. ID tokens are verified against
   the provider's keys (PKCE, nonce, issuer, audience, expiry).
 - **Roles** are sets of permissions — `news.read`, `reader.fetch`, `vote.personal`, `vote.community`,
   `queries.save`, `comments.read` / `.post` / `.moderate`, `sources.manage`, `archive.manage`, `users.manage`,
@@ -71,18 +83,25 @@ Outlet votes scale how stories rank and which outlet leads a story. Two modes, s
 
 ## Research: binder, right-click menu, query builder
 Signed in, each user has a **research binder** (`[❏ binder]` by the query bar, `b`, or `binder` in the terminal) for
-saved **stories**, **articles** and **quotes**, each with an optional note. You can keep several binders (tabs along
-the top: ＋ new binder, double-click to rename, × to delete); saving goes into the open one, and entries can be
-moved between them. Every saved article and quote cites its
-article by **morgue no.**: an article whose full text isn't in the morgue is filed as a *fragment* (headline and
-summary only, marked "fragment") at the moment it's saved, and keeps that number when the full text is fetched later.
+saved **stories**, **articles**, **quotes** and **notes**. You can keep several binders (tabs along the top: ＋ new
+binder, double-click to rename, × to delete); saving goes into the open one, and entries can be moved between them.
+**Notes** work like private comments: in a popover's or the reader's NOTES section, add as many as you like to an
+article or story — each is timestamped, can be edited (marked *edited*) or removed, and goes into the binder citing
+what it's about; `[✎ new note]` in the binder writes one that isn't tied to anything. Every saved article, quote and
+note cites its article by **morgue no.**: an article whose full text isn't in the morgue is filed as a *fragment*
+(headline and summary only, marked "fragment") at that moment, and keeps that number when the full text is filed later.
+
+**Sharing:** the owner of a binder can share it (`[⇆ share]`, by username) as **read only**, **add & read** (add
+entries, and change or remove the ones you added) or **full edit** (change or remove anything). A shared binder shows
+among the other user's binders (marked ⇆, with who it's from), entries show who added them, and `saved:yes` includes
+it; only the owner can rename, delete or re-share it, and the other user can leave it.
 The main page also has a **binder sidebar** on the right (`shift+B`, or the `« BINDER` rail): the open binder at a
 glance — switch binders, filter by kind, click an entry to open it, or drag a headline from the results onto it to
 save the article. `⧉ cite` copies a citation, and **COPY ALL AS CITATIONS** copies the whole tab. `saved:yes` finds saved articles
 (in STORIES mode, saved stories).
 
-**Right-click** anything in the results, the popovers or the reader for STRINGER's menu (shift + right-click gives the
-browser's): with text selected, *save quote to binder*, *add the word to the query builder* (plain, as `body:`, or
+**Right-click** anywhere for STRINGER's menu (shift + right-click gives the browser's; text fields keep the browser's) —
+everywhere it offers the binder and the query builder, plus: with text selected, *save quote to binder*, *add the word to the query builder* (plain, as `body:`, or
 excluded) or *search it now*; on an article or story, *save* (or remove) it, open it in the reader, copy the link.
 
 The **query builder** (`q`, or the `⌕ QUERY BUILDER` tab on the right) is a scratch query that floats over every
@@ -163,7 +182,7 @@ nvidia huang                         terms are ANDed; word-prefix match
 source:(dailywire OR npr)            field applied to a group
 a OR b · a AND b · NOT a · -a · !a   boolean ops, ( ) grouping, also && ||
 trump*  te?t  huang~1                wildcards, fuzzy
-title:/gta ?(6|vi)/                  regex
+title:/gta ?(6|vi)/                  regex (case-insensitive, linear-time: no backreferences; up to 5 per query)
 bias:[l TO ll]  bias:>0  votes:>=3   ranges ([ ] inclusive, { } exclusive, * open) and comparisons
 age:<6h  date:today  date:>=2026-11-17
 body:"court documents" words:>1000   full article text, byline, length (see Full-text archive)
@@ -230,8 +249,26 @@ Expect the archive to reach roughly 10–20M articles / 8–12 GB. The sitemap p
 Wayback pass is rate-limited for politeness and takes a few days to complete.
 
 ## Full-text archive
-Every article that appears in the live feeds is fetched once in the background (`lib/harvest-worker.js`),
-run through the reader-view extraction, and its text stored in the archive with its own full-text index.
+Articles are fetched once in the background (`lib/harvest-worker.js`, the *auto-filer*), run through the reader-view
+extraction, and their text filed in the morgue with its own full-text index. **What gets filed** is the morgue's
+**mode** (archive panel, `morgue <mode>` in the terminal, or the setup wizard; needs `archive.manage`):
+
+| mode | filed |
+|---|---|
+| **auto** | every article that appears in the live feeds — plus what's opened in the reader or saved to a binder |
+| **ad-hoc** | what someone opens in the reader or saves to a binder |
+| **manual** | only what's saved to a binder, or filed by hand (right-click → *File in the morgue*) |
+| **fragment** | like manual, but as fragments: headline and summary only — no page is fetched |
+
+A new server starts in **fragment** mode (a server from before modes existed keeps filing everything). In any mode,
+**also file every incoming headline + summary as a fragment** (archive panel, `morgue fragments on|off`; on by default)
+gives each live-feed article a morgue no. as it arrives — a record of good headlines and summaries even when the text
+is never fetched; in auto and ad-hoc mode the full text replaces the fragment later and keeps its number, and a site
+that refuses a fragment's text leaves the fragment as it is (the Wayback fallback then tries its archived copy).
+
+In every mode a binder save files the article right away (its text is fetched first thing, except in fragment mode),
+right-click → *File in the morgue* works on any unfiled article, and removing something from a binder never unfiles
+it. In manual and fragment mode the reader still shows the page, but says it wasn't filed.
 That adds three query fields, usable on the live feeds and the archive alike:
 
 ```
@@ -242,12 +279,14 @@ morgue:fa5ee277                      an article in the STRINGER morgue, by its m
 comment:"good point"  comments:>=5   comment text / number of comments (STORIES mode: the whole discussion)
 words:>1500  words:0                 article length (0 = no full text stored)
 ```
-An article whose full text STRINGER has saved is filed in the **STRINGER morgue** (newsrooms' name for their archive of
+An article whose full text STRINGER has fetched is filed in the **STRINGER morgue** (newsrooms' name for their archive of
 clippings) under its own **morgue no.** — 8 random hex characters, unique (`morgue no. fa5ee277`; click it to copy) —
-and carries a `▣ MORGUE` tag showing its morgue no. (click to copy; hover for the word count and save date) in the
+and carries a `▣ MORGUE` tag showing its morgue no. (click to copy; hover for the word count and filing date) in the
 popovers and the reader header — and on STREAM rows once the article is older than the 14-day live window. STORIES-mode
 rows don't show it: the story is the focus there. `morgue:fa5ee277` finds one again (`uuid:`/`nid:` work too);
-`morgue:*` matches everything in the morgue; `/api/read?morgue=fa5ee277` opens it. A morgue no. lookup searches **all time** unless
+`morgue:*` matches everything in the morgue; the morgue records **who filed** each article — you, when opening an
+unfiled article in the reader (or saving it to a binder) is what filed it, otherwise the auto-filer — shown in the
+reader's DETAILS, at the end of the morgue copy, and as *filed by* counts in the archive panel; `/api/read?morgue=fa5ee277` opens it. A morgue no. lookup searches **all time** unless
 the query has its own `date:`/`age:` clause (it's usually an older article), and a query that is just a morgue no.
 (`fa5ee277`) is read as `morgue:fa5ee277`. Opening an article whose headline was rebuilt from its URL (`≈`) replaces that
 headline (and an empty summary / approximate date) with the real one from the page once its text is archived.
@@ -266,7 +305,9 @@ turns it off. It adds roughly 5–10 KB per article (about 5–10 MB a day).
 
 ## Saved queries & tabs
 Type a query and press `s` (or click `[☆ save]`) to save it. Pinned saved queries become tabs under
-the toolbar with live hit counts. Optionally a saved query also remembers the view (mode, sort, time window).
+the toolbar with live hit counts. Optionally a saved query also remembers the view (mode, sort, time window), and
+it can turn off **highlighting** — the yellow marks on the search words — for a tab that follows a story rather than
+searches (which articles matched still shows; the marks come back as soon as you edit the query).
 - click a tab to apply it · `[` / `]` cycle tabs · `alt+1…9` jump to a tab
 - drag tabs to reorder · right-click (or `⋯`) to rename / edit / unpin / delete
 - unpinned queries live under `saved (n) ▾`, and all of them show up when the query box is empty
@@ -281,7 +322,7 @@ shown in the site's theme with `[A−]`/`[A+]` size and a mono/serif/sans toggle
 paywalled stubs and script-only pages fall back to the feed summary plus OPEN ORIGINAL / TRY EMBEDDED PAGE.
 Old links die (sites restructure their URLs, e.g. Fox's 2015 `/politics/2015/01/04/<slug>/` pages now 404): when
 a page is gone (HTTP 404/410, a redirect to the front page, or a "not found" page) the reader shows the Wayback
-Machine copy saved closest to the article's publish date, says so, and points OPEN at that copy; it's then stored
+Machine copy captured closest to the article's publish date, says so, and points OPEN at that copy; it's then filed
 like any other reader result. For **archive articles** (older than the live window, or indexed from sitemaps /
 Wayback feed snapshots / HN) the Wayback copy is used whenever the original can't be read at all — the site refuses
 the request, is unreachable or times out, or has no article text — since it's the historical record of that page. Old Feedsportal feed links (`rss.nytimes.com/c/…`, `feeds.washingtonpost.com/c/…`)

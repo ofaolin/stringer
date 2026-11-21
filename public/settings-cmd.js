@@ -80,10 +80,19 @@ export function createSettingsCommands(ctx) {
       try { const p = reader.setPref(k, String(v || '').toLowerCase()); log(`reader → font ${p.font}, size ${p.size}px`, 'ok'); } catch (e) { fail(e); }
     },
     async morgue(a) {
-      const v = onOff(a[0] || '');
-      if (v === null) return log('usage: morgue on|off — keep filing live-feed articles into the morgue, or pause it (archive opens the status)');
+      // auto | adhoc | manual | fragment (on → auto, off → ad-hoc, as before modes existed)
+      const w = String(a[0] || '').toLowerCase().replace('ad-hoc', 'adhoc');
+      if (w === 'fragments' || w === 'headlines') {
+        const on = onOff(a[1] || '');
+        if (on === null) return log('usage: morgue fragments on|off — file every incoming headline + summary as a fragment (in any mode)');
+        if (denied('archive.manage')) return;
+        try { await api('archive', { method: 'POST', body: { action: 'fragment-all', on } }); log(`morgue: incoming headlines ${on ? 'filed as fragments' : 'not filed on arrival'}`, 'ok'); } catch (e) { fail(e); }
+        return;
+      }
+      const mode = ['auto', 'adhoc', 'manual', 'fragment'].includes(w) ? w : onOff(w) === true ? 'auto' : onOff(w) === false ? 'adhoc' : null;
+      if (!mode) return log('usage: morgue auto|adhoc|manual|fragment — auto: every live-feed article · adhoc: what\'s opened in the reader or saved to a binder · manual: only binder saves and right-click → File in the morgue · fragment: like manual, headline + summary only (archive shows the status)');
       if (denied('archive.manage')) return;
-      try { await api('archive', { method: 'POST', body: { action: v ? 'fulltext-start' : 'fulltext-pause' } }); log(`morgue filing ${v ? 'running' : 'paused'}`, v ? 'ok' : 'warn'); } catch (e) { fail(e); }
+      try { await api('archive', { method: 'POST', body: { action: 'morgue-mode', mode } }); log(`morgue mode → ${mode}`, 'ok'); } catch (e) { fail(e); }
     },
     async admin(a) {
       if (!auth.can('users.manage') && !auth.can('settings.manage')) return denied('settings.manage');
@@ -295,7 +304,7 @@ export function createSettingsCommands(ctx) {
     commands: [
       ['settings', '', 'all settings at a glance'], ['whoami', '', 'your account & permissions'], ['login', '', 'sign in'], ['logout', '', 'sign out'],
       ['passwd', '', 'change your password'], ['name', '<display name>', 'your display name'], ['rank', 'community|personal', 'ranking mode'],
-      ['discussion', 'open|closed', 'comment sidebar default'], ['reader', 'font|size <value>', 'reader typeface / size'], ['morgue', 'on|off', 'file articles in the morgue'],
+      ['discussion', 'open|closed', 'comment sidebar default'], ['reader', 'font|size <value>', 'reader typeface / size'], ['morgue', 'auto|adhoc|manual|fragment', 'what gets filed in the morgue'],
       ['server', '[setting value]', 'server settings (admin)'], ['sso', '[setting value]', 'single sign-on (admin)'],
       ['users', '', 'list users (admin)'], ['user', 'add|role|disable|enable|passwd|delete', 'manage a user (admin)'],
       ['roles', '', 'list roles (admin)'], ['perms', '', 'list permissions (admin)'], ['role', 'add|grant|revoke|delete', 'manage a role (admin)'],
@@ -307,7 +316,7 @@ export function createSettingsCommands(ctx) {
       const bools = [['on', ''], ['off', '']];
       if (c === 'rank') return n ? null : [['community', "everyone's votes"], ['personal', 'your votes']];
       if (c === 'discussion') return n ? null : [['open', ''], ['closed', '']];
-      if (c === 'morgue') return n ? null : bools;
+      if (c === 'morgue') return n ? null : [['auto', 'every live-feed article'], ['adhoc', 'opened in the reader or saved to a binder'], ['manual', 'binder saves and right-click → File in the morgue'], ['fragment', 'like manual: headline + summary only'], ['fragments', 'on|off: every incoming headline as a fragment']];
       if (c === 'reader') return !n ? [['font', 'mono|serif|sans'], ['size', '13–24']] : n === 1 && words[0] === 'font' ? [['mono', ''], ['serif', ''], ['sans', '']] : null;
       if (c === 'admin') return n ? null : [['users', ''], ['roles', ''], ['settings', ''], ['sso', '']];
       if (c === 'server') {

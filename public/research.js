@@ -1,4 +1,5 @@
-// Research tools: the per-user binder (saved stories, articles and quotes, each citing its article by morgue no.),
+// Research tools: the binder (saved stories, articles, quotes and notes, each citing its article by morgue no.; a
+// binder can be shared with other users — read only, add & read, or full edit),
 // a custom right-click menu (save a quote / article / story, gather a word into the query builder, search it), and
 // the floating query builder — a scratch query you can build up while reading in any popover.
 export function createResearch(ctx) {
@@ -9,6 +10,11 @@ export function createResearch(ctx) {
   let books = [];                         // the user's binders [{ id, name, count }]
   let book = store.get('binderBook', null);   // the open binder (saves go here)
   const bookName = () => books.find((b) => b.id === book)?.name || 'binder';
+  const curBook = () => books.find((b) => b.id === book) || null;
+  const canAddTo = (b) => !!b && b.role !== 'read';                 // owner / add / edit
+  const ROLE_LABEL = { read: 'read only', add: 'add & read', edit: 'full edit', owner: 'yours' };
+  const byLine = (e) => (e.by ? ` <span class="dim">· by ${esc(e.by)}</span>` : '');
+  const stamp = (e) => `${esc(ctx.agoText(e.created))}${e.edited ? ` <span class="dim" title="edited ${esc(new Date(e.edited).toLocaleString())}">· edited</span>` : ''}`;
   const savedLinks = new Set(), savedSids = new Set();
 
   // ───────────────────────── binder data ─────────────────────────
@@ -59,12 +65,25 @@ export function createResearch(ctx) {
     catch (e) { log(`couldn't remove: ${esc(e.message)}`, 'err'); }
   }
 
+  async function fileInMorgue(a) {
+    try {
+      const r = await api('morgue/file', { method: 'POST', body: { link: a.link } });
+      if (r.morgue) ctx.onMorgue?.(r.link || a.link, r.morgue);
+      ctx.activity?.('archive', `filed in the morgue: ${a.title || a.link}${r.morgue ? ` (morgue no. ${r.morgue})` : ''}`, { link: a.link, title: a.title, sourceId: a.sourceId, date: a.date });
+      log(`▣ filed in the morgue <span class="dim">· morgue no. ${esc(r.morgue || '?')}${r.fetching ? ' · fetching the text…' : r.filedBy ? ` · filed by ${esc(r.filedBy)}` : ''}</span> — ${esc((a.title || '').slice(0, 70))}`, 'ok');
+    } catch (e) { if (!auth.denied(e)) log(`couldn't file it: ${esc(e.data?.error || e.message)}`, 'err'); }
+  }
   // a citation for an entry (plain text, for copying)
   function citation(e) {
     const s = srcById(e.sourceId);
     const date = e.published ? new Date(e.published).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' }) : '';
     if (e.kind === 'story') return `STRINGER story ${e.sid}: “${e.title}”${e.sources ? ` (${e.sources} outlets, ${e.articles} articles)` : ''}${e.link ? ` — lead: ${e.link}` : ''}`;
     const src = `${s?.name || e.sourceId || ''}, “${e.title}”${date ? `, ${date}` : ''}. ${e.link}${e.morgue ? ` · STRINGER morgue no. ${e.morgue}` : ''}`;
+    if (e.kind === 'note') {
+      const when = new Date(e.edited || e.created).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+      const on = e.sid ? ` — on STRINGER story ${e.sid}: “${e.title}”` : e.link ? ` — on ${src}` : '';
+      return `Note${e.by ? ` by ${e.by}` : ''} (${when}): ${e.note}${on}`;
+    }
     return e.kind === 'quote' ? `“${e.quote}” — ${src}` : src;
   }
 
@@ -76,7 +95,9 @@ export function createResearch(ctx) {
   document.body.append(dlg);
   const body = dlg.querySelector('#binder-body');
   let tab = store.get('binderTab', 'all');
-  let editing = null, renaming = null, moving = null;
+  let editing = null, renaming = null, moving = null, composing = false, sharing = false, shareMsg = '', shareRole = 'read';
+  let linking = null, linkMsg = '';                // an unlinked note being pointed at an article / story
+  const roleSeg = (cur, act) => `<span class="bd-seg">${['read', 'add', 'edit'].map((r) => `<button type="button" class="${r === cur ? 'on' : ''}" data-bd="${act}" data-role="${r}">${ROLE_LABEL[r]}</button>`).join('')}</span>`;
   const focusRename = () => { const i = body.querySelector('.bd-rename'); if (i) { i.focus(); i.select(); } };
   async function finishRename(save) {
     const i = body.querySelector('.bd-rename');
@@ -86,52 +107,82 @@ export function createResearch(ctx) {
     if (save && name) { try { await api(`binder/books/${id}`, { method: 'PATCH', body: { name } }); } catch (ex) { log(`couldn't rename: ${esc(ex.message)}`, 'err'); } }
     await load(); render();
   }
-  const TABS = [['all', 'ALL'], ['quote', 'QUOTES'], ['article', 'ARTICLES'], ['story', 'STORIES']];
+  const TABS = [['all', 'ALL'], ['quote', 'QUOTES'], ['note', 'NOTES'], ['article', 'ARTICLES'], ['story', 'STORIES']];
 
   function render() {
     const inBook = (items || []).filter((e) => e.book === book);
     const list = inBook.filter((e) => tab === 'all' || e.kind === tab);
     const n = (k) => inBook.filter((e) => k === 'all' || e.kind === k).length;
+    const cb = curBook(), writable = canAddTo(cb);
+    const morgueTag = (e) => (e.morgue ? `<button type="button" class="ft bd-morgue${e.fragment ? ' partial' : ''}" data-bd="copy-morgue" data-morgue="${esc(e.morgue)}" title="${e.fragment ? 'filed as a fragment: headline and summary only, until the full text is fetched' : `${(e.words || 0).toLocaleString()} words in the morgue`} — click to copy" >▣ MORGUE ${esc(e.morgue)}${e.fragment ? ' · fragment' : ''}</button>` : '');
+    const moveTo = books.filter((b) => b.id !== book && canAddTo(b));
     const row = (e) => {
       const s = srcById(e.sourceId);
       const when = e.published ? ctx.fmtTime(e.published) : '';
       const head = e.kind === 'story'
         ? `<span class="bd-kind">▤ STORY <b class="sid">${esc(e.sid)}</b></span> <span class="dim">${e.sources != null ? `${e.sources} outlets · ${e.articles} articles` : ''}${e.newest ? ` · updated ${esc(ctx.agoText(e.newest))}` : ''}${e.live === false ? ' · left the live window' : ''}</span>`
-        : `<span class="bd-kind">${e.kind === 'quote' ? '❝ QUOTE' : '▣ ARTICLE'}</span> ${s ? `${chip(s.bias)} ${esc(s.name)}` : ''} <span class="dim">· ${esc(when)}</span>
-           ${e.morgue ? `<button type="button" class="ft bd-morgue${e.fragment ? ' partial' : ''}" data-bd="copy-morgue" data-morgue="${esc(e.morgue)}" title="${e.fragment ? 'filed as a fragment: headline and summary only, until the full text is fetched' : `${(e.words || 0).toLocaleString()} words in the morgue`} — click to copy" >▣ MORGUE ${esc(e.morgue)}${e.fragment ? ' · fragment' : ''}</button>` : ''}`;
+        : e.kind === 'note'
+          ? `<span class="bd-kind">✎ NOTE</span>${e.sid ? ` <span class="dim">on story</span> <b class="sid">${esc(e.sid)}</b>` : e.link ? ` <span class="dim">on</span> ${s ? `${chip(s.bias)} ${esc(s.name)}` : 'an article'} ${morgueTag(e)}` : ' <span class="dim">· unlinked</span>'}`
+          : `<span class="bd-kind">${e.kind === 'quote' ? '❝ QUOTE' : '▣ ARTICLE'}</span> ${s ? `${chip(s.bias)} ${esc(s.name)}` : ''} <span class="dim">· ${esc(when)}</span> ${morgueTag(e)}`;
+      const cited = e.kind !== 'note' || e.link || e.sid;
       return `<div class="bd-item bd-${e.kind}" data-id="${e.id}">
-        <div class="bd-head">${head}<span class="bd-sp"></span><span class="dim small">saved ${esc(ctx.agoText(e.created))}</span></div>
+        <div class="bd-head">${head}<span class="bd-sp"></span><span class="dim small">${e.kind === 'note' ? 'written' : 'saved'} ${stamp(e)}${byLine(e)}</span></div>
         ${e.kind === 'quote' ? `<blockquote class="bd-quote">${esc(e.quote)}</blockquote>` : ''}
-        <div class="bd-title">${e.kind === 'quote' ? '<span class="dim">from </span>' : ''}<button type="button" class="link bd-open" data-bd="open">${esc(e.title || e.link)}</button></div>
-        ${editing === e.id ? `<div class="bd-note-edit"><textarea data-bd-note maxlength="4000" placeholder="a note for yourself…">${esc(e.note || '')}</textarea>
-            <div class="bd-acts"><button type="button" class="link" data-bd="note-cancel">[cancel]</button> <button type="button" data-bd="note-save">SAVE NOTE</button></div></div>`
-          : e.note ? `<div class="bd-note">✎ ${esc(e.note)}</div>` : ''}
+        ${e.kind === 'note' ? (editing === e.id
+          ? `<div class="bd-note-edit"><textarea data-bd-note maxlength="4000">${esc(e.note || '')}</textarea>
+              <div class="bd-acts"><span class="dim small">ctrl+⏎ to save</span> <button type="button" class="link" data-bd="note-cancel">[cancel]</button> <button type="button" data-bd="note-save">SAVE NOTE</button></div></div>`
+          : `<div class="bd-note-text">${esc(e.note || '')}</div>`) : ''}
+        ${linking === e.id ? `<div class="bd-link-edit"><input data-bd-cite maxlength="400" spellcheck="false" autocomplete="off" placeholder="paste a morgue no. or story no. — e.g. e063432a or 41b679 (an article link works too)" />
+            <button type="button" data-bd="cite-save">LINK</button> <button type="button" class="link" data-bd="cite-cancel">[cancel]</button>
+            ${linkMsg ? `<div class="err small">${esc(linkMsg)}</div>` : ''}</div>` : ''}
+        ${cited ? `<div class="bd-title">${e.kind === 'quote' ? '<span class="dim">from </span>' : e.kind === 'note' ? '<span class="dim">on </span>' : ''}<button type="button" class="link bd-open" data-bd="open">${esc(e.title || e.link)}</button></div>` : ''}
         <div class="bd-acts">
-          <button type="button" class="link" data-bd="open">[${e.kind === 'story' ? 'open story' : 'read'} ▸]</button>
+          ${cited ? `<button type="button" class="link" data-bd="open">[${e.sid ? 'open story' : 'read'} ▸]</button>` : ''}
           <button type="button" class="link" data-bd="cite" title="copy a citation">[⧉ cite]</button>
-          <button type="button" class="link" data-bd="note">[✎ ${e.note ? 'edit note' : 'note'}]</button>
-          ${e.kind !== 'story' ? `<button type="button" class="link" data-bd="query" title="add this article's morgue no. to the query builder">[＋ query]</button>` : `<button type="button" class="link" data-bd="query" title="add story:${esc(e.sid)} to the query builder">[＋ query]</button>`}
-          ${books.length > 1 ? `<span class="bd-move-w"><button type="button" class="link" data-bd="move" aria-expanded="${moving === e.id}" title="move to another binder">[⇄ move ▾]</button>${moving === e.id
-            ? `<div class="ctx-menu bd-move-menu"><div class="ctx-head">move to…</div>${books.filter((b) => b.id !== e.book).map((b) => `<button type="button" class="ctx-item" data-bd-move-to="${b.id}"><span class="ctx-ic">▤</span><span class="ctx-l">${esc(b.name)}</span><span class="ctx-h">${b.count}</span></button>`).join('')}</div>` : ''}</span>` : ''}
-          <button type="button" class="link err" data-bd="delete">[remove]</button>
+          ${e.kind === 'note' && e.canChange ? '<button type="button" class="link" data-bd="note">[✎ edit]</button>' : ''}
+          ${e.kind === 'note' && !cited && e.canChange && linking !== e.id ? '<button type="button" class="link" data-bd="cite-link" title="tie this note to an article (morgue no.) or a story (story no.)">[⛓ link…]</button>' : ''}
+          ${cited ? `<button type="button" class="link" data-bd="query" title="${e.sid ? `add story:${esc(e.sid)}` : "add this article's morgue no."} to the query builder">[＋ query]</button>` : ''}
+          ${e.canChange && moveTo.length ? `<span class="bd-move-w"><button type="button" class="link" data-bd="move" aria-expanded="${moving === e.id}" title="move to another binder">[⇄ move ▾]</button>${moving === e.id
+            ? `<div class="ctx-menu bd-move-menu"><div class="ctx-head">move to…</div>${moveTo.map((b) => `<button type="button" class="ctx-item" data-bd-move-to="${b.id}"><span class="ctx-ic">${b.role === 'owner' ? '▤' : '⇆'}</span><span class="ctx-l">${esc(b.name)}</span><span class="ctx-h">${b.count}</span></button>`).join('')}</div>` : ''}</span>` : ''}
+          ${e.canChange ? '<button type="button" class="link err" data-bd="delete">[remove]</button>' : ''}
         </div>
       </div>`;
     };
+    const share = !cb ? '' : cb.role === 'owner'
+      ? (cb.shares?.length ? ` · <span title="${esc(cb.shares.map((x) => `${x.display || x.username} (@${x.username}) — ${ROLE_LABEL[x.role]}`).join('\n'))}">shared with ${cb.shares.length}</span>` : '')
+      : ` · shared by ${esc(cb.owner || 'someone')} · <b>${ROLE_LABEL[cb.role]}</b>`;
+    const sharePanel = sharing && cb?.role === 'owner' ? `<div class="bd-share">
+        <div class="bd-share-h">⇆ SHARE “${esc(cb.name)}” <span class="dim">— people you share it with see it among their binders</span></div>
+        ${(cb.shares || []).map((x) => `<div class="bd-share-row" data-share-user="${esc(x.username)}"><span>${esc(x.display || x.username)} <span class="dim">@${esc(x.username)}</span></span>
+            ${roleSeg(x.role, 'share-role')}
+            <button type="button" class="link err" data-bd="share-remove">[remove]</button></div>`).join('') || '<div class="dim small">not shared with anyone yet</div>'}
+        <div class="bd-share-add"><input data-share-name placeholder="username" maxlength="32" spellcheck="false" autocomplete="off" />
+          ${roleSeg(shareRole, 'share-pick')}
+          <button type="button" data-bd="share-add">SHARE</button> <button type="button" class="link" data-bd="share-close">[done]</button></div>
+        <div class="dim small">read only: see it · add &amp; read: also add, and change what they added · full edit: change or remove anything (only you can rename, delete or share it)</div>
+        ${shareMsg ? `<div class="err small">${esc(shareMsg)}</div>` : ''}
+      </div>` : '';
+    const composer = composing && writable ? `<div class="bd-compose"><textarea data-bd-new maxlength="4000" placeholder="a note — not tied to any article or story (ctrl+⏎ to save)"></textarea>
+        <div class="bd-acts"><span class="dim small">goes into ${esc(bookName())}</span> <button type="button" class="link" data-bd="compose-cancel">[cancel]</button> <button type="button" data-bd="compose-save">SAVE NOTE</button></div></div>` : '';
     body.innerHTML = `
-      <div class="st-head"><div class="dlg-head"><span>// RESEARCH BINDER <span class="dim">${inBook.length} saved in ${esc(bookName())}</span></span><button type="button" class="link" data-bd="close" title="close (esc)">[esc]</button></div></div>
+      <div class="st-head"><div class="dlg-head"><span>// RESEARCH BINDER <span class="dim">${inBook.length} in ${esc(bookName())}${share}</span></span><button type="button" class="link" data-bd="close" title="close (esc)">[esc]</button></div></div>
       <div class="bd-books">${books.map((b) => renaming === b.id
           ? `<span class="bd-book on"><input class="bd-rename" data-bd-rename="${b.id}" maxlength="40" value="${esc(b.name)}" /></span>`
-          : `<span class="bd-book${b.id === book ? ' on' : ''}"><button type="button" data-bd-book="${b.id}" title="${b.id === book ? 'double-click to rename' : `open ${esc(b.name)}`}">${esc(b.name)} <span class="dim">${b.count}</span></button>${b.id === book && books.length > 1 ? `<button type="button" class="bd-book-x" data-bd="book-delete" title="delete this binder and everything in it">×</button>` : ''}</span>`).join('')}
+          : `<span class="bd-book${b.id === book ? ' on' : ''}${b.role !== 'owner' ? ' shared' : ''}"><button type="button" data-bd-book="${b.id}" title="${b.role !== 'owner' ? `shared by ${esc(b.owner || 'someone')} — ${ROLE_LABEL[b.role]}` : b.id === book ? 'double-click to rename' : `open ${esc(b.name)}`}">${b.role !== 'owner' ? '⇆ ' : ''}${esc(b.name)} <span class="dim">${b.count}</span></button>${b.id === book && b.role === 'owner' && books.filter((x) => x.role === 'owner').length > 1 ? `<button type="button" class="bd-book-x" data-bd="book-delete" title="delete this binder and everything in it">×</button>` : ''}</span>`).join('')}
           <button type="button" class="bd-book-add" data-bd="book-add" title="a new binder">＋ new binder</button></div>
-      <div class="bd-tabs">${TABS.map(([k, l]) => `<button type="button" class="${k === tab ? 'on' : ''}" data-bd-tab="${k}">${l} <span class="dim">${n(k)}</span></button>`).join('')}</div>
+      <div class="bd-tabs">${TABS.map(([k, l]) => `<button type="button" class="${k === tab ? 'on' : ''}" data-bd-tab="${k}">${l} <span class="dim">${n(k)}</span></button>`).join('')}
+        <span class="bd-tools">${writable ? '<button type="button" class="link" data-bd="compose" title="a note of your own, not tied to an article or story">[✎ new note]</button>' : ''}
+          ${cb?.role === 'owner' ? `<button type="button" class="link" data-bd="share" aria-expanded="${sharing}">[⇆ share]</button>` : cb ? '<button type="button" class="link" data-bd="leave" title="stop seeing this shared binder">[leave]</button>' : ''}</span></div>
+      ${sharePanel}${composer}
       <div class="bd-list">${!signedIn() ? '<div class="dim bd-empty">&gt; sign in to keep a research binder</div>'
-        : list.length ? list.map(row).join('') : `<div class="dim bd-empty">&gt; nothing here yet — right-click an article or story to save it, or select text and right-click to save a quote</div>`}</div>
-      <div class="st-foot-bar bd-foot"><span class="dim small bd-help">quotes cite their article by morgue no. · right-click anything to save it<br><b>saved:yes</b> finds saved articles (in STORIES mode: saved stories)</span>
+        : list.length ? list.map(row).join('') : `<div class="dim bd-empty">&gt; nothing here yet — right-click an article or story to save it, select text and right-click to save a quote, or write a note</div>`}</div>
+      <div class="st-foot-bar bd-foot"><span class="dim small bd-help">quotes and notes cite their article by morgue no. · right-click anything to save it<br><b>saved:yes</b> finds saved articles (in STORIES mode: saved stories)</span>
         <span class="bd-foot-btns">${list.length ? '<button type="button" data-bd="export">⧉ COPY ALL AS CITATIONS</button> ' : ''}<button type="button" data-bd="close">CLOSE</button></span></div>`;
+    if (composing) body.querySelector('[data-bd-new]')?.focus();
   }
-  async function open() {
+  async function open(opts = {}) {
     if (!needBinder()) return;
-    editing = null;
+    editing = null; sharing = false; shareMsg = ''; linking = null; linkMsg = ''; composing = !!opts?.compose;
     body.innerHTML = '<div class="dim st-loading"><span class="spin">⟳</span> opening the binder…</div>';
     if (!dlg.open) dlg.showModal();
     await load();
@@ -144,8 +195,8 @@ export function createResearch(ctx) {
     const bk = e.target.closest('[data-bd-book]');
     if (bk) {
       const id = Number(bk.dataset.bdBook);
-      if (id === book && e.detail >= 2) { renaming = id; render(); return focusRename(); }        // double-click: rename
-      if (id !== book) { book = id; store.set('binderBook', book); editing = null; await load(); render(); }
+      if (id === book && e.detail >= 2 && curBook()?.role === 'owner') { renaming = id; render(); return focusRename(); }   // double-click: rename
+      if (id !== book) { book = id; store.set('binderBook', book); editing = null; composing = false; sharing = false; shareMsg = ''; await load(); render(); }
       return;
     }
     const t = e.target.closest('[data-bd-tab]');
@@ -164,6 +215,43 @@ export function createResearch(ctx) {
     const act = b.dataset.bd, id = Number(b.closest('[data-id]')?.dataset.id);
     const ent = (items || []).find((x) => x.id === id);
     if (act === 'close') return dlg.close();
+    if (act === 'compose') { composing = true; return render(); }
+    if (act === 'compose-cancel') { composing = false; return render(); }
+    if (act === 'compose-save') return saveNewNote();
+    if (act === 'share') { sharing = !sharing; shareMsg = ''; render(); return body.querySelector('[data-share-name]')?.focus(); }
+    if (act === 'share-close') { sharing = false; shareMsg = ''; return render(); }
+    if (act === 'share-pick') {
+      shareRole = b.dataset.role;
+      const typed = body.querySelector('[data-share-name]')?.value || '';
+      render(); const i = body.querySelector('[data-share-name]'); if (i) { i.value = typed; i.focus(); }
+      return;
+    }
+    if (act === 'share-role') {
+      const username = b.closest('[data-share-user]').dataset.shareUser, role = b.dataset.role;
+      try { await api(`binder/books/${book}/shares`, { method: 'POST', body: { username, role } }); shareMsg = ''; log(`⇆ ${esc(username)} → ${ROLE_LABEL[role]} <span class="dim">· ${esc(bookName())}</span>`, 'ok'); }
+      catch (ex) { shareMsg = ex.data?.error || ex.message; }
+      await load(); return render();
+    }
+    if (act === 'share-add' || act === 'share-remove') {
+      const username = act === 'share-add' ? body.querySelector('[data-share-name]')?.value.trim() : b.closest('[data-share-user]')?.dataset.shareUser;
+      if (!username) { shareMsg = 'type the username to share with'; return render(); }
+      const role = act === 'share-add' ? shareRole : null;
+      try {
+        await api(`binder/books/${book}/shares`, { method: 'POST', body: { username, role } });
+        shareMsg = '';
+        log(act === 'share-add' ? `⇆ ${esc(bookName())} shared with <b>${esc(username)}</b> <span class="dim">· ${ROLE_LABEL[role]}</span>` : `⇆ stopped sharing ${esc(bookName())} with ${esc(username)}`, 'ok');
+      } catch (ex) { shareMsg = ex.data?.error || ex.message; }
+      await load(); render();
+      if (act === 'share-add' && shareMsg) body.querySelector('[data-share-name]')?.focus();
+      return;
+    }
+    if (act === 'leave') {
+      const cur = curBook();
+      if (!cur || !confirm(`leave the shared binder “${cur.name}”? (${cur.owner || 'its owner'} can share it with you again)`)) return;
+      try { await api(`binder/books/${book}/shares/me`, { method: 'DELETE' }); book = null; await load(); render(); log(`left the shared binder “${esc(cur.name)}”`); }
+      catch (ex) { log(`couldn't leave: ${esc(ex.data?.error || ex.message)}`, 'err'); }
+      return;
+    }
     if (act === 'book-add') {
       try { const r = await api('binder/books', { method: 'POST', body: { name: `Binder ${books.length + 1}` } }); book = r.book.id; store.set('binderBook', book); await load(); renaming = book; render(); focusRename(); }
       catch (ex) { log(`couldn't add a binder: ${esc(ex.message)}`, 'err'); }
@@ -179,25 +267,25 @@ export function createResearch(ctx) {
     if (act === 'export') { const list = (items || []).filter((x) => x.book === book && (tab === 'all' || x.kind === tab)); return copy(list.map(citation).join('\n\n'), `${list.length} citation${list.length === 1 ? '' : 's'}`); }
     if (!ent) return;
     if (act === 'open') {
-      if (ent.kind === 'story') { dlg.close(); return ctx.openStoryBySid(ent.sid, ent.link); }
+      if (ent.sid) { dlg.close(); return ctx.openStoryBySid(ent.sid, ent.link); }
+      if (!ent.link) return;
       dlg.close();
       return ctx.reader.open({ link: ent.link, title: ent.title, sourceId: ent.sourceId, date: ent.published });
     }
     if (act === 'move') { moving = moving === id ? null : id; render(); return body.querySelector('.bd-move-menu .ctx-item')?.focus({ preventScroll: true }); }
     if (act === 'cite') return copy(citation(ent), 'the citation');
     if (act === 'copy-morgue') return copy(ent.morgue, `morgue no. ${esc(ent.morgue)}`);
-    if (act === 'query') return builder.add(ent.kind === 'story' ? `story:${ent.sid}` : ent.morgue ? `morgue:${ent.morgue}` : `url:${ent.link}`, { open: true });
+    if (act === 'query') return builder.add(ent.sid ? `story:${ent.sid}` : ent.morgue ? `morgue:${ent.morgue}` : `url:${ent.link}`, { open: true });
     if (act === 'note') { editing = id; render(); return body.querySelector('[data-bd-note]')?.focus(); }
     if (act === 'note-cancel') { editing = null; return render(); }
-    if (act === 'note-save') {
-      const note = body.querySelector('[data-bd-note]').value;
-      try { await api(`binder/${id}`, { method: 'PATCH', body: { note } }); ent.note = note.trim() || null; editing = null; render(); }
-      catch (ex) { log(`couldn't save the note: ${esc(ex.message)}`, 'err'); }
-      return;
-    }
+    if (act === 'note-save') return saveEditedNote(ent);
+    if (act === 'cite-link') { linking = id; linkMsg = ''; render(); return body.querySelector('[data-bd-cite]')?.focus(); }
+    if (act === 'cite-cancel') { linking = null; linkMsg = ''; return render(); }
+    if (act === 'cite-save') return linkNote(ent);
     if (act === 'delete') {
-      try { await api(`binder/${id}`, { method: 'DELETE' }); await load(); render(); log('removed from the binder'); }
-      catch (ex) { log(`couldn't remove: ${esc(ex.message)}`, 'err'); }
+      if (ent.kind === 'note' && !confirm('remove this note?')) return;
+      try { await api(`binder/${id}`, { method: 'DELETE' }); await load(); render(); log(`removed from ${esc(bookName())}`); }
+      catch (ex) { log(`couldn't remove: ${esc(ex.data?.error || ex.message)}`, 'err'); }
     }
   });
   dlg.addEventListener('keydown', (e) => {
@@ -214,7 +302,42 @@ export function createResearch(ctx) {
       return;
     }
     if (/TEXTAREA|INPUT|SELECT/.test(e.target.tagName)) e.stopPropagation();
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      if (e.target.matches?.('[data-bd-new]')) { e.preventDefault(); saveNewNote(); }
+      else if (e.target.matches?.('[data-bd-note]')) { e.preventDefault(); saveEditedNote((items || []).find((x) => x.id === editing)); }
+    }
+    if (e.key === 'Enter' && e.target.matches?.('[data-share-name]')) { e.preventDefault(); body.querySelector('[data-bd="share-add"]')?.click(); }
+    if (e.target.matches?.('[data-bd-cite]')) {
+      if (e.key === 'Enter') { e.preventDefault(); linkNote((items || []).find((x) => x.id === linking)); }
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); linking = null; linkMsg = ''; render(); }
+    }
+    if (e.key === 'Escape' && (composing || editing != null) && e.target.matches?.('textarea')) { e.preventDefault(); e.stopPropagation(); composing = false; editing = null; render(); }
   });
+  async function linkNote(ent) {
+    const input = body.querySelector('[data-bd-cite]'), cite = input?.value.trim();
+    if (!ent || !cite) return input?.focus();
+    try {
+      const r = await api(`binder/${ent.id}`, { method: 'PATCH', body: { cite } });
+      linking = null; linkMsg = '';
+      await load(); render();
+      log(`⛓ note linked to ${esc(r.cites)}${r.title ? ` <span class="dim">— ${esc(r.title.slice(0, 70))}</span>` : ''}`, 'ok');
+    } catch (ex) { linkMsg = ex.data?.error || ex.message; render(); const i = body.querySelector('[data-bd-cite]'); if (i) { i.value = cite; i.focus(); i.select(); } }
+  }
+  async function saveNewNote() {
+    const note = body.querySelector('[data-bd-new]')?.value.trim();
+    if (!note) return;
+    try {
+      await api('binder', { method: 'POST', body: { kind: 'note', note, book } });
+      ctx.activity?.('note', `noted in ${bookName()}: “${note.slice(0, 80)}”`);
+      composing = false; await load(); render(); log(`✎ note saved <span class="dim">· ${esc(bookName())}</span>`, 'ok');
+    } catch (ex) { log(`couldn't save the note: ${esc(ex.data?.error || ex.message)}`, 'err'); }
+  }
+  async function saveEditedNote(ent) {
+    const note = body.querySelector('[data-bd-note]')?.value.trim();
+    if (!ent || !note) return;
+    try { await api(`binder/${ent.id}`, { method: 'PATCH', body: { note } }); editing = null; await load(); render(); log('✎ note updated', 'ok'); }
+    catch (ex) { log(`couldn't save the note: ${esc(ex.data?.error || ex.message)}`, 'err'); }
+  }
   dlg.addEventListener('focusout', (e) => { if (e.target.matches?.('.bd-rename')) setTimeout(() => finishRename(true), 0); });
 
 
@@ -257,7 +380,7 @@ export function createResearch(ctx) {
     // live inside whichever modal is open (they sit in the top layer, above everything else)
     const place = () => {
       const host = [...document.querySelectorAll('dialog[open]')].pop() || document.body;
-      if (el.parentNode !== host) host.append(el);
+      if (el.parentNode !== host) { host.append(el); watchHost(host, el, place); }
     };
     new MutationObserver(place).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['open'] });
     const setOpen = (o) => { el.classList.toggle('open', o); store.set('qbOpen', o); if (o) { place(); ta.focus(); } };
@@ -348,23 +471,35 @@ export function createResearch(ctx) {
     else if (e.key === 'ArrowUp') { e.preventDefault(); btns[(k - 1 + btns.length) % btns.length]?.focus(); }
   });
   document.addEventListener('mousedown', (e) => { if (!menu.hidden && !menu.contains(e.target)) hideMenu(); }, true);
-  document.addEventListener('scroll', () => { if (!menu.hidden) hideMenu(); }, true);
+  // Right-clicking just past a selection (where a drag ended: after the last word, in the margin) makes the browser
+  // clear it before the menu opens — so there'd be no quote to save. Keep it when the click is close to the selection.
+  document.addEventListener('mousedown', (e) => {
+    if (e.button !== 2 || e.shiftKey) return;
+    const s = getSelection();
+    if (!s || s.isCollapsed || !s.rangeCount || !String(s).trim()) return;
+    const PAD = 40;
+    const near = [...s.getRangeAt(0).getClientRects()].some((r) => e.clientX >= r.left - PAD && e.clientX <= r.right + PAD && e.clientY >= r.top - PAD && e.clientY <= r.bottom + PAD);
+    if (near) e.preventDefault();
+  }, true);
+  // the user scrolling closes it (wheel / touch; the keyboard is the menu's while it's open, and grabbing a scrollbar is
+  // a mousedown outside it) — but not the page scrolling itself, which happens around a click (focus, selection)
+  for (const t of ['wheel', 'touchmove']) document.addEventListener(t, (e) => { if (!menu.hidden && !menu.contains(e.target)) hideMenu(); }, { capture: true, passive: true });
+  addEventListener('resize', () => { if (!menu.hidden) hideMenu(); });
 
   // an entry in the binder sidebar or the binder popover, as a right-click context
   function binderContext(node) {
     const it = node.closest?.('#binder-side .bs-item, #binder-body .bd-item');
     const ent = it && (items || []).find((x) => x.id === Number(it.dataset.id));
     if (!ent) return null;
-    if (ent.kind === 'story') return { el: it, story: { sid: ent.sid, title: ent.title, sourceCount: ent.sources, articles: [] }, entry: ent };
-    return { el: it, article: asArt(ent), entry: ent };
+    if (ent.sid) return { el: it, story: { sid: ent.sid, title: ent.title, sourceCount: ent.sources, articles: [] }, entry: ent };
+    return ent.link ? { el: it, article: asArt(ent), entry: ent } : { el: it, entry: ent };
   }
   document.addEventListener('contextmenu', (e) => {
     if (e.shiftKey || e.target.closest('input, textarea, .ctx-menu, .qb')) return;   // the browser's own menu
     const where = binderContext(e.target) || ctx.contextAt(e.target);   // { article?, story? } or null
     const sel = String(getSelection()?.toString() || '').trim();
     const selIn = sel && getSelection().rangeCount && where?.el?.contains(getSelection().getRangeAt(0).commonAncestorContainer);
-    if (!where && !sel) return;
-    e.preventDefault();
+    e.preventDefault();                                  // (anywhere on the site: at least the binder and the builder)
     const a = where?.article, st = where?.story;
     const entries = [];
     if (sel) {
@@ -394,6 +529,8 @@ export function createResearch(ctx) {
         ? { icon: '▣', label: 'Open article details', hint: 'archive', run: where.openStory }
         : { icon: '▤', label: `Open story${st?.sid ? ` <b>${esc(st.sid)}</b>` : ''}`, hint: st?.sourceCount ? `${st.sourceCount} outlets` : '', run: where.openStory });
       if (a && !where.inReader) entries.push({ icon: '▸', label: 'Open in reader', run: () => ctx.reader.open(ctx.asArticle(a)) });
+      // not (known to be) in the morgue: file it now — in any mode (manual / fragment mode: the way to file by hand)
+      if (a && !where.entry && signedIn() && auth.can('reader.fetch') && !ctx.morgueOf?.(a)) entries.push({ icon: '▣', label: 'File in the morgue', hint: 'morgue no.', run: () => fileInMorgue(a) });
       if (a) entries.push({ icon: '⧉', label: 'Copy link', run: () => copy(a.link, 'the link') });
       if (st?.sid) entries.push({ icon: '＋', label: `Add <b>story:${esc(st.sid)}</b> to query`, run: () => builder.add(`story:${st.sid}`) });
     }
@@ -402,10 +539,18 @@ export function createResearch(ctx) {
       entries.push(null, { icon: '⧉', label: 'Copy citation', run: () => copy(citation(ent), 'the citation') });
       if (ent.morgue) entries.push({ icon: '▣', label: `Copy morgue no. <b>${esc(ent.morgue)}</b>`, run: () => copy(ent.morgue, `morgue no. ${esc(ent.morgue)}`) });
       if (ent.kind === 'quote') entries.push({ icon: '❝', label: 'Copy the quote', run: () => copy(ent.quote, 'the quote') });
-      if (ent.kind === 'quote') entries.push({ icon: '×', label: 'Remove this quote', cls: 'err', run: async () => { try { await api(`binder/${ent.id}`, { method: 'DELETE' }); await load(); if (dlg.open) render(); log(`removed from ${esc(bookName())}`); } catch (ex) { log(`couldn't remove: ${esc(ex.message)}`, 'err'); } } });
+      if (ent.kind === 'note') entries.push({ icon: '✎', label: 'Copy the note', run: () => copy(ent.note || '', 'the note') });
+      if (ent.kind === 'quote' && ent.canChange) entries.push({ icon: '×', label: 'Remove this quote', cls: 'err', run: async () => { try { await api(`binder/${ent.id}`, { method: 'DELETE' }); await load(); if (dlg.open) render(); log(`removed from ${esc(bookName())}`); } catch (ex) { log(`couldn't remove: ${esc(ex.message)}`, 'err'); } } });
     }
+    // a plain link (an outlet's site, a link in the text…) when nothing above covers it: what the browser's menu offered
+    const lk = !a && e.target.closest('a[href]');
+    if (lk && /^https?:/i.test(lk.href)) entries.push(null,
+      { icon: '↗', label: 'Open link in a new tab', run: () => window.open(lk.href, '_blank', 'noopener') },
+      { icon: '⧉', label: 'Copy link address', run: () => copy(lk.href, 'the link') });
     entries.push(null, { icon: '❏', label: 'Open the binder', hint: 'b', run: open }, { icon: '⌕', label: 'Show the query builder', hint: 'q', run: () => builder.toggle() });
-    showMenu(e.clientX, e.clientY, entries);
+    // (no separator at the top, or two in a row)
+    const tidy = entries.filter((x, i, all) => x || (i > 0 && all[i - 1] && i < all.length - 1));
+    showMenu(e.clientX, e.clientY, tidy);
   });
 
   load();
@@ -431,12 +576,13 @@ export function createResearch(ctx) {
   // the article details tooltip (as in the popovers) for an entry; stories get the same frame
   const asArt = (e) => ({ link: e.link, title: e.title, sourceId: e.sourceId, date: e.published, summary: e.summary || '' });
   function entryTip(e) {
-    if (e.kind === 'story') {
+    if (e.sid) {
       return ` title="${esc(e.title || '')}" data-tip-head="${esc(`STORY ${e.sid}${e.sources != null ? ` · ${e.sources} outlets · ${e.articles} articles` : ''}`)}" data-tip-title="${esc(`“${e.title || ''}”`)}"`
         + ` data-tip-sub="${esc([e.newest ? `updated ${ctx.agoText(e.newest)}` : '', e.live === false ? 'no longer in the live window' : ''].filter(Boolean).join(' · ') || ' ')}"`
         + ` data-tip-foot="click to open the story · right-click for more"`;
     }
-    return ctx.articleTip(asArt(e), { alert: e.kind === 'quote' ? `❝ ${e.quote.length > 140 ? e.quote.slice(0, 140) + '…' : e.quote}` : '', foot: 'click to read · right-click for more' });
+    const clip = (t) => (t.length > 140 ? t.slice(0, 140) + '…' : t);
+    return ctx.articleTip(asArt(e), { alert: e.kind === 'quote' ? `❝ ${clip(e.quote)}` : e.kind === 'note' ? `✎ ${clip(e.note || '')}` : '', foot: 'click to read · right-click for more' });
   }
   function renderSide() {
     side ??= document.getElementById('binder-side');
@@ -458,16 +604,20 @@ export function createResearch(ctx) {
     }
   };
   function renderPanel(target, floating) {
-    const icon = { quote: '❝', article: '▣', story: '▤' };
+    const icon = { quote: '❝', article: '▣', story: '▤', note: '✎' };
+    const cb = curBook();
     const list = (items || []).filter((e) => e.book === book && (sideKind === 'all' || e.kind === sideKind));
     const entry = (e) => {
       const s = srcById(e.sourceId);
-      return `<div class="bs-item" data-id="${e.id}">
-        <div class="bs-meta"><span class="bs-ic">${icon[e.kind]}</span>${e.kind === 'story' ? `<b class="sid">${esc(e.sid)}</b> <span class="dim">${e.sources ?? ''}${e.sources != null ? ' outlets' : ''}</span>` : `${s ? chip(s.bias) + ' ' : ''}<span class="dim">${esc(s?.name || '')}</span>`}
-          <span class="bs-acts"><button type="button" class="link" data-bs="cite" title="copy a citation">⧉</button><button type="button" class="link err" data-bs="remove" title="remove from ${esc(bookName())}">×</button></span></div>
-        ${e.kind === 'quote' ? `<div class="bs-quote${quoteOpen.has(e.id) ? ' open' : ''}">“${esc(e.quote)}”</div><button type="button" class="link bs-more" data-bs="more" hidden>${quoteOpen.has(e.id) ? '▴ less' : '▾ show the whole quote'}</button>` : ''}
-        <button type="button" class="bs-title" data-bs="open-item"${entryTip(e)}>${esc(e.title || e.link || '')}</button>
-        ${e.note ? `<div class="bs-note">✎ ${esc(e.note)}</div>` : ''}
+      const meta = e.kind === 'note'
+        ? `<span class="dim">${e.sid ? `story <b class="sid">${esc(e.sid)}</b>` : e.link ? esc(s?.name || 'article') : 'unlinked'} · ${esc(ctx.agoText(e.edited || e.created))}${e.by ? ` · ${esc(e.by)}` : ''}</span>`
+        : e.kind === 'story' ? `<b class="sid">${esc(e.sid)}</b> <span class="dim">${e.sources ?? ''}${e.sources != null ? ' outlets' : ''}</span>` : `${s ? chip(s.bias) + ' ' : ''}<span class="dim">${esc(s?.name || '')}${e.by ? ` · ${esc(e.by)}` : ''}</span>`;
+      const text = e.kind === 'quote' ? `“${e.quote}”` : e.kind === 'note' ? e.note || '' : '';
+      return `<div class="bs-item bs-k-${e.kind}" data-id="${e.id}">
+        <div class="bs-meta"><span class="bs-ic">${icon[e.kind]}</span>${meta}
+          <span class="bs-acts"><button type="button" class="link" data-bs="cite" title="copy a citation">⧉</button>${e.canChange ? `<button type="button" class="link err" data-bs="remove" title="remove from ${esc(bookName())}">×</button>` : ''}</span></div>
+        ${text ? `<div class="bs-quote${quoteOpen.has(e.id) ? ' open' : ''}">${esc(text)}</div><button type="button" class="link bs-more" data-bs="more" hidden>${quoteOpen.has(e.id) ? '▴ less' : `▾ show the whole ${e.kind}`}</button>` : ''}
+        ${e.link || e.sid ? `<button type="button" class="bs-title" data-bs="open-item"${entryTip(e)}>${e.kind === 'note' ? '<span class="dim">on </span>' : ''}${esc(e.title || e.link || '')}</button>` : ''}
       </div>`;
     };
     target.innerHTML = `
@@ -476,10 +626,10 @@ export function createResearch(ctx) {
       : !canBinder() ? '<div class="dim bs-empty">your role can\'t keep a binder</div>' : `
       <div class="bs-books">${books.map((b) => (sideRenaming === b.id
         ? `<input class="bs-rename" data-bs-rename="${b.id}" maxlength="40" value="${esc(b.name)}" />`
-        : `<button type="button" class="${b.id === book ? 'on' : ''}" data-bs-book="${b.id}" title="${b.id === book ? 'double-click to rename' : `open ${esc(b.name)}`}">${esc(b.name)} <span class="dim">${b.count}</span></button>`)).join('')}<button type="button" class="bs-add" data-bs="add" title="a new binder">＋</button></div>
-      <div class="bs-kinds">${[['all', 'ALL'], ['quote', '❝'], ['article', '▣'], ['story', '▤']].map(([k, l]) => `<button type="button" class="${k === sideKind ? 'on' : ''}" data-bs-kind="${k}" title="${k === 'all' ? 'everything' : k + 's'}">${l}</button>`).join('')}</div>
+        : `<button type="button" class="${b.id === book ? 'on' : ''}" data-bs-book="${b.id}" title="${b.role !== 'owner' ? `shared by ${esc(b.owner || 'someone')} — ${ROLE_LABEL[b.role]}` : b.id === book ? 'double-click to rename' : `open ${esc(b.name)}`}">${b.role !== 'owner' ? '⇆ ' : ''}${esc(b.name)} <span class="dim">${b.count}</span></button>`)).join('')}<button type="button" class="bs-add" data-bs="add" title="a new binder">＋</button></div>
+      <div class="bs-kinds">${[['all', 'ALL'], ['quote', '❝'], ['note', '✎'], ['article', '▣'], ['story', '▤']].map(([k, l]) => `<button type="button" class="${k === sideKind ? 'on' : ''}" data-bs-kind="${k}" title="${k === 'all' ? 'everything' : k + 's'}">${l}</button>`).join('')}</div>
       <div class="bs-list">${list.length ? list.map(entry).join('') : `<div class="dim bs-empty">${(items || []).some((e) => e.book === book) ? 'nothing of this kind here' : 'empty — right-click anything to save it, or drag a headline here'}</div>`}</div>
-      <div class="bs-foot"><button type="button" class="link" data-bs="full">[open the full binder ▸]</button></div>`}`;
+      <div class="bs-foot">${canAddTo(cb) ? '<button type="button" class="link" data-bs="new-note" title="write a note of your own (opens the binder)">[✎ note]</button>' : `<span class="dim small">${cb ? ROLE_LABEL[cb.role] : ''}</span>`}<button type="button" class="link" data-bs="full">[full binder ▸]</button></div>`}`;
     markCutQuotes(target);
   }
   async function onPanelClick(e) {
@@ -487,7 +637,7 @@ export function createResearch(ctx) {
     const bk = e.target.closest('[data-bs-book]');
     if (bk) {
       const id = Number(bk.dataset.bsBook);
-      if (id === book && e.detail >= 2) { sideRenaming = id; renderSide(); const i = panel.querySelector('.bs-rename'); i?.focus(); i?.select(); return; }
+      if (id === book && e.detail >= 2 && curBook()?.role === 'owner') { sideRenaming = id; renderSide(); const i = panel.querySelector('.bs-rename'); i?.focus(); i?.select(); return; }
       if (id !== book) { book = id; store.set('binderBook', book); await load(); if (dlg.open) render(); }
       return;
     }
@@ -500,6 +650,7 @@ export function createResearch(ctx) {
     if (a === 'float-close') return closeFloat();
     if (a === 'signin') return auth.openLogin('sign in to keep a research binder');
     if (a === 'full') return open();
+    if (a === 'new-note') return open({ compose: true });
     if (a === 'add') {
       try {
         const r = await api('binder/books', { method: 'POST', body: { name: `Binder ${books.length + 1}` } });
@@ -517,13 +668,18 @@ export function createResearch(ctx) {
       if (quoteOpen.has(ent.id)) quoteOpen.delete(ent.id); else quoteOpen.add(ent.id);
       const item = e.target.closest('.bs-item');
       item.querySelector('.bs-quote').classList.toggle('open', quoteOpen.has(ent.id));
-      e.target.closest('.bs-more').textContent = quoteOpen.has(ent.id) ? '▴ less' : '▾ show the whole quote';
+      e.target.closest('.bs-more').textContent = quoteOpen.has(ent.id) ? '▴ less' : `▾ show the whole ${ent.kind}`;
       return;
     }
     if (a === 'cite') return copy(citation(ent), 'the citation');
-    if (a === 'remove') { try { await api(`binder/${ent.id}`, { method: 'DELETE' }); await load(); if (dlg.open) render(); log(`removed from ${esc(bookName())}`); } catch (ex) { log(`couldn't remove: ${esc(ex.message)}`, 'err'); } return; }
+    if (a === 'remove') {
+      if (ent.kind === 'note' && !confirm('remove this note?')) return;
+      try { await api(`binder/${ent.id}`, { method: 'DELETE' }); await load(); if (dlg.open) render(); log(`removed from ${esc(bookName())}`); } catch (ex) { log(`couldn't remove: ${esc(ex.data?.error || ex.message)}`, 'err'); }
+      return;
+    }
     if (a === 'open-item') {
-      if (ent.kind === 'story') return ctx.openStoryBySid(ent.sid, ent.link);
+      if (ent.sid) return ctx.openStoryBySid(ent.sid, ent.link);
+      if (!ent.link) return;
       return ctx.reader.open({ link: ent.link, title: ent.title, sourceId: ent.sourceId, date: ent.published });
     }
   }
@@ -568,7 +724,7 @@ export function createResearch(ctx) {
   function placeFloat() {
     const host = [...document.querySelectorAll('dialog[open]')].pop();
     if (!host) { hideFloat(); return false; }                    // it only floats over popovers
-    if (floatEl.parentNode !== host) host.append(floatEl);
+    if (floatEl.parentNode !== host) { host.append(floatEl); watchHost(host, floatEl, () => { if (!floatEl.hidden) placeFloat(); }); }
     return true;
   }
   // shown at once — the popover's opening animation never moves or fades it (see dlg-frame-in in the CSS)
@@ -599,9 +755,11 @@ export function createResearch(ctx) {
   document.body.classList.toggle('bside-open', !!store.get('bsideOpen', false));
 
   // ───────────────────────── notes in the popover sidebars ─────────────────────────
-  // target: { kind: 'story', st } | { kind: 'article', a }. Saving a note puts the story / article into the open
-  // binder with that note (or updates the note if it's already there).
-  const entryFor = (t) => (items || []).find((e) => e.book === book && (t.kind === 'story' ? e.kind === 'story' && e.sid === t.st.sid : e.kind === 'article' && norm(e.link) === norm(t.a.link)));
+  // target: { kind: 'story', st } | { kind: 'article', a }. Notes work like private comments: each is its own binder
+  // entry (citing this story / article), timestamped, as many as you like. Shown: the notes on it in every binder you
+  // can open (yours, and others' in binders shared with you); new ones go into the open binder.
+  const notesFor = (t) => (items || []).filter((e) => e.kind === 'note' && (t.kind === 'story' ? e.sid === t.st.sid : !e.sid && norm(e.link) === norm(t.a.link)))
+    .sort((x, y) => x.created - y.created);
   async function mountNote(el, t) {
     if (!el) return;
     if (!signedIn()) {
@@ -611,52 +769,67 @@ export function createResearch(ctx) {
     }
     if (!auth.can('binder.use')) { el.closest('.pop-note-sec')?.remove(); return; }
     if (!items || !books.length) await load();       // (the first load can run before sign-in is known)
-    let editingNote = false;
+    let adding = false, editingId = null;
     const draw = () => {
-      const e = entryFor(t);
+      const list = notesFor(t), cb = curBook();
       const where = el.closest('.pop-note-sec')?.querySelector('.note-where');     // looked up each time: popovers re-render
-      if (where) where.textContent = e ? `· in ${bookName()}` : '';
-      if (editingNote) {
-        el.innerHTML = `<div class="note-form"><textarea data-note-text maxlength="4000" placeholder="${t.kind === 'story' ? 'notes on this story…' : 'notes on this article…'}">${esc(e?.note || '')}</textarea>
-          <div class="note-acts"><span class="dim small">ctrl+⏎ to save · saves to ${esc(bookName())}</span><button type="button" class="link" data-note="cancel">[cancel]</button> <button type="button" class="note-save" data-note="save">SAVE</button></div></div>`;
-        const ta = el.querySelector('textarea');
-        ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
-        return;
-      }
-      el.innerHTML = e?.note
-        ? `<div class="note-text">${esc(e.note)}</div><button type="button" class="link note-edit" data-note="edit">[✎ edit]</button>`
-        : `<button type="button" class="link note-add" data-note="edit">[+ add a note]</button>${e ? '' : ` <span class="dim small">saves the ${t.kind} to ${esc(bookName())}</span>`}`;
+      if (where) where.textContent = list.length ? `· ${list.length}` : '';
+      const multi = new Set(list.map((n) => n.book)).size > 1 || list.some((n) => n.book !== book);
+      const one = (n) => `<div class="note-item" data-note-id="${n.id}">
+          <div class="note-meta dim small">${esc(ctx.agoText(n.created))}${n.edited ? ` · <span title="edited ${esc(new Date(n.edited).toLocaleString())}">edited</span>` : ''}${n.by ? ` · ${esc(n.by)}` : ''}${multi ? ` · ${esc(books.find((b) => b.id === n.book)?.name || '')}` : ''}
+            ${n.canChange && editingId !== n.id ? `<span class="note-acts"><button type="button" class="link" data-note="edit">[edit]</button> <button type="button" class="link err" data-note="delete">[×]</button></span>` : ''}</div>
+          ${editingId === n.id
+            ? `<div class="note-form"><textarea data-note-text maxlength="4000">${esc(n.note || '')}</textarea>
+                <div class="note-acts"><span class="dim small">ctrl+⏎ to save</span><button type="button" class="link" data-note="cancel">[cancel]</button> <button type="button" class="note-save" data-note="update">SAVE</button></div></div>`
+            : `<div class="note-text">${esc(n.note || '')}</div>`}
+        </div>`;
+      const form = adding
+        ? `<div class="note-form"><textarea data-note-text maxlength="4000" placeholder="${t.kind === 'story' ? 'a note on this story…' : 'a note on this article…'}"></textarea>
+            <div class="note-acts"><span class="dim small">ctrl+⏎ to save · into ${esc(bookName())}</span><button type="button" class="link" data-note="cancel">[cancel]</button> <button type="button" class="note-save" data-note="save">SAVE</button></div></div>`
+        : canAddTo(cb) ? `<button type="button" class="link note-add" data-note="add">[+ add a note]</button>`
+          : `<span class="dim small">${esc(bookName())} is read only — switch binders to add notes</span>`;
+      el.innerHTML = `${list.length ? `<div class="note-list">${list.map(one).join('')}</div>` : ''}${form}`;
+      const ta = el.querySelector('textarea');
+      if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
     };
-    async function saveNote() {
+    const label = () => (t.kind === 'story' ? `story ${t.st.sid}` : 'an article');
+    const ref = () => (t.kind === 'story' ? { sid: t.st.sid } : { link: t.a.link, title: t.a.title, sourceId: t.a.sourceId, date: t.a.date });
+    async function saveNew() {
       const note = el.querySelector('[data-note-text]')?.value.trim() || '';
-      const e = entryFor(t);
+      if (!note) return;
       try {
-        ctx.activity?.('note', `${note ? 'noted' : 'cleared the note'} on ${t.kind === 'story' ? `story ${t.st.sid}` : 'an article'}${note ? `: “${note.slice(0, 80)}”` : ''} — ${(t.kind === 'story' ? t.st.title : t.a.title) || ''}`,
-          t.kind === 'story' ? { sid: t.st.sid } : { link: t.a.link, title: t.a.title, sourceId: t.a.sourceId, date: t.a.date });
-        if (e) { await api(`binder/${e.id}`, { method: 'PATCH', body: { note } }); e.note = note || null; log(`✎ note ${note ? 'saved' : 'cleared'} <span class="dim">· ${esc(bookName())}</span>`, 'ok'); }
-        else if (note) {
-          const body = t.kind === 'story' ? { kind: 'story', sid: t.st.sid, note, book } : { kind: 'article', link: t.a.link, note, book };
-          const r = await api('binder', { method: 'POST', body });
-          if (r.item?.morgue && r.item.link) ctx.onMorgue?.(r.item.link, r.item.morgue);
-          // saving an item that was already there returns it unchanged: set the note on it
-          if (r.item && (r.item.note || '') !== note) await api(`binder/${r.item.id}`, { method: 'PATCH', body: { note } });
-          await load();
-          log(`✎ note saved — ${t.kind === 'story' ? `story <b>${esc(t.st.sid)}</b>` : 'the article'} is now in ${esc(bookName())}${r.item?.morgue ? ` <span class="dim">· morgue no. ${esc(r.item.morgue)}</span>` : ''}`, 'ok');
-        }
-        editingNote = false; draw();
-        if (dlg.open) render();
+        const body = t.kind === 'story' ? { kind: 'note', sid: t.st.sid, note, book } : { kind: 'note', link: t.a.link, note, book };
+        const r = await api('binder', { method: 'POST', body });
+        if (r.item?.morgue && r.item.link) ctx.onMorgue?.(r.item.link, r.item.morgue);
+        ctx.activity?.('note', `noted on ${label()}: “${note.slice(0, 80)}” — ${(t.kind === 'story' ? t.st.title : t.a.title) || ''}`, ref());
+        adding = false; await load(); draw(); if (dlg.open) render();
+        log(`✎ note saved <span class="dim">· ${esc(bookName())}${r.item?.morgue ? ` · cites morgue no. ${esc(r.item.morgue)}` : ''}</span>`, 'ok');
       } catch (ex) { if (!auth.denied(ex)) log(`couldn't save the note: ${esc(ex.data?.error || ex.message)}`, 'err'); }
     }
-    el.onclick = (e) => {
+    async function saveEdit() {
+      const note = el.querySelector('[data-note-text]')?.value.trim() || '';
+      if (!note || editingId == null) return;
+      try { await api(`binder/${editingId}`, { method: 'PATCH', body: { note } }); editingId = null; await load(); draw(); if (dlg.open) render(); log('✎ note updated', 'ok'); }
+      catch (ex) { log(`couldn't save the note: ${esc(ex.data?.error || ex.message)}`, 'err'); }
+    }
+    el.onclick = async (e) => {
       const a = e.target.closest('[data-note]')?.dataset.note;
-      if (a === 'edit') { editingNote = true; draw(); }
-      else if (a === 'cancel') { editingNote = false; draw(); }
-      else if (a === 'save') saveNote();
+      const id = Number(e.target.closest('[data-note-id]')?.dataset.noteId);
+      if (a === 'add') { adding = true; editingId = null; draw(); }
+      else if (a === 'edit') { editingId = id; adding = false; draw(); }
+      else if (a === 'cancel') { adding = false; editingId = null; draw(); }
+      else if (a === 'save') saveNew();
+      else if (a === 'update') saveEdit();
+      else if (a === 'delete') {
+        if (!confirm('remove this note?')) return;
+        try { await api(`binder/${id}`, { method: 'DELETE' }); await load(); draw(); if (dlg.open) render(); log('✎ note removed'); }
+        catch (ex) { log(`couldn't remove: ${esc(ex.data?.error || ex.message)}`, 'err'); }
+      }
     };
     el.onkeydown = (e) => {
       e.stopPropagation();                                     // typing must not trigger popover shortcuts
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveNote(); }
-      if (e.key === 'Escape' && editingNote) { e.preventDefault(); editingNote = false; draw(); }
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); if (editingId != null) saveEdit(); else saveNew(); }
+      if (e.key === 'Escape' && (adding || editingId != null)) { e.preventDefault(); adding = false; editingId = null; draw(); }
     };
     el._redraw = draw;
     draw();
@@ -664,4 +837,15 @@ export function createResearch(ctx) {
   // the open binder changed (or an entry did): refresh any note boxes on screen
   const redrawNotes = () => { for (const el of document.querySelectorAll('.note-slot')) if (el._redraw && !el.querySelector('textarea')) el._redraw(); };
   return { open, toggle, load, mountNote, redrawNotes, toggleSide: () => (document.querySelector('dialog[open]') ? toggleFloat() : setSide(!sideOpen())), renderSide, builder, saveArticle, saveStory, isSavedArticle, isSavedStory };
+}
+
+// A popover that re-renders itself (d.innerHTML = …, e.g. switching admin panel tabs) wipes out whatever was placed
+// inside it — the builder and the floating binder live in the open dialog. Watch the host's direct children and put
+// the element back when it's been removed. One observer per element, moved along with it.
+const hostWatch = new WeakMap();
+function watchHost(host, el, restore) {
+  let w = hostWatch.get(el);
+  if (!w) { w = new MutationObserver(() => { if (!el.isConnected) restore(); }); hostWatch.set(el, w); }
+  w.disconnect();
+  if (host !== document.body) w.observe(host, { childList: true });
 }
