@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>STRINGER // terminal</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' fill='black'/><text x='2' y='13' font-family='monospace' font-size='13' fill='%2333ff66'>&gt;</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;800&family=VT323&display=swap" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="boot" aria-hidden="true"><pre id="boot-log"></pre></div>
+  <div class="crt" aria-hidden="true"></div>
+
+  <div id="app">
+    <header class="top">
+      <pre class="logo" aria-label="STRINGER — no news is old news">
+<span class="lg-paper"> __________</span>      ___ _____ ___  ___ _  _  ___ ___ ___
+<span class="lg-paper">|~~<b>NEWS</b>~~~~||</span>   / __|_   _| _ \|_ _| \| |/ __| __| _ \
+<span class="lg-paper">|<i>[##]</i> =====|||</span>  \__ \ | | |   / | || .` | (_ | _||   /
+<span class="lg-paper">|<i>[##]</i> =====|||</span>  |___/ |_| |_|_\|___|_|\_|\___|___|_|_\
+<span class="lg-paper">|==== =====|||</span>  <span class="lg-rule">======================================</span>
+<span class="lg-paper">|__________|/</span>     <span class="lg-tag">- NO    NEWS   IS    OLD    NEWS  -</span></pre>
+      <div class="status">
+        <div><span class="dim">uplink</span> <span id="st-uplink" class="ok">●</span> <span id="st-feeds">--/--</span> <span class="dim">feeds</span></div>
+        <div><span class="dim">articles</span> <span id="st-articles">----</span> <span class="dim">· stories</span> <span id="st-stories">---</span></div>
+        <div><span class="dim">last sync</span> <span id="st-sync">--:--:--</span> <button id="btn-refresh" class="link needs-perm-sources-manage" title="Refresh all feeds (r)">[sync]</button></div>
+        <div><span class="dim">clock</span> <span id="st-clock">--:--:--</span> <span class="dim">· ads blocked</span> <span class="ok">∞</span></div>
+        <div class="st-user" id="st-user"></div>
+        <div class="st-archive"><span class="dim">archive</span> <span id="st-archive">--</span> <button id="btn-archive" class="link" title="historical archive status">[archive]</button></div>
+      </div>
+    </header>
+
+    <div class="ticker" id="ticker" aria-label="top headlines">
+      <span class="tk-mark">//</span>
+      <div class="tk-view"><div class="tk-track" id="tk-track"><span class="dim">acquiring headlines…</span></div></div>
+      <span class="tk-mark">//</span>
+    </div>
+
+    <nav class="toolbar">
+      <div class="group" id="mode">
+        <span class="label">mode:</span>
+        <button data-mode="stories" class="on" title="articles grouped into stories across outlets, with bias coverage (live feeds only)">STORIES</button>
+        <button data-mode="stream" title="every article on its own, ungrouped">STREAM</button>
+        <button data-blind="1" title="inserts blindspot:any into the query">BLINDSPOT</button>
+      </div>
+      <div class="group" id="bias">
+        <span class="label">bias:</span>
+        <button data-bias="-2" class="on b-L" title="toggles l in the query's bias: clause (shift-click: only L)">L</button>
+        <button data-bias="-1" class="on b-LL" title="toggles ll in the query's bias: clause (shift-click: only LL)">LL</button>
+        <button data-bias="0" class="on b-C" title="toggles c in the query's bias: clause (shift-click: only C)">C</button>
+        <button data-bias="1" class="on b-LR" title="toggles lr in the query's bias: clause (shift-click: only LR)">LR</button>
+        <button data-bias="2" class="on b-R" title="toggles r in the query's bias: clause (shift-click: only R)">R</button>
+      </div>
+      <div class="group" id="type">
+        <span class="label">media:</span>
+        <button data-type="all" class="on" title="removes the type: clause">ALL</button>
+        <button data-type="legacy" title="inserts type:legacy into the query">LEGACY</button>
+        <button data-type="new" title="inserts type:new into the query">NEW</button>
+      </div>
+      <div class="group" id="hours">
+        <span class="label" id="win-label">window:</span>
+        <button data-win="12h" title="inserts age:<12h into the query">12h</button>
+        <button data-win="24h" title="inserts age:<24h into the query">24h</button>
+        <button data-win="48h" title="inserts age:<48h into the query">48h</button>
+        <button data-win="7d" title="inserts age:<7d into the query">7d</button>
+        <button data-win="all" title="inserts date:* into the query — all time, searches the historical archive">ALL</button>
+      </div>
+      <div class="group" id="sort">
+        <span class="label">sort:</span>
+        <button data-sort="top" class="on" title="ranked by recency × coverage × your source votes — the most important news right now (live feeds only)">TOP</button>
+        <button data-sort="latest" title="newest first, by publish time">LATEST</button>
+        <button data-sort="oldest" title="oldest first — useful for reading an archive range from its start">OLDEST</button>
+        <button data-sort="coverage" class="stories-only" title="stories covered by the most outlets first (stories mode, live feeds only)">COVERAGE</button>
+      </div>
+      <div class="search ac-host" id="qbox">
+        <span class="prompt">query <span class="q-sl">//</span></span>
+        <div class="qwrap">
+          <div class="qhl" id="q-hl" aria-hidden="true"></div>
+          <input id="q" type="text" placeholder='e.g. source:(dailywire OR npr) AND title:nvidia   ( / )' autocomplete="off" spellcheck="false" />
+        </div>
+        <span id="q-status" class="q-status"></span>
+        <button id="q-adv" class="link q-help" type="button" title="advanced query editor (e)">[⌨ advanced]</button>
+        <button id="q-stats" class="link q-help" type="button" title="summary & charts for this query (g)">[▥ stats]</button>
+        <button id="q-save" class="link q-help needs-perm-queries-save" type="button" title="save this query (s)">[☆ save]</button>
+        <button id="q-binder" class="link q-help needs-perm-binder-use" type="button" title="your research binder: saved stories, articles and quotes (b)">[❏ binder]</button>
+        <button id="q-help" class="link q-help" type="button" title="query syntax">[?]</button>
+      </div>
+    </nav>
+
+    <div class="tabs" id="tabs" role="tablist"></div>
+
+    <div class="layout">
+      <aside class="sources" id="sources">
+        <div class="pane-head">
+          <span class="pane-tabs" role="tablist">//
+            <button type="button" role="tab" data-pane="stats" title="quick stats for the current query">STATS</button>
+            <button type="button" role="tab" data-pane="sources" title="the outlets: vote, enable/disable, edit, filter">SOURCES <span class="dim" id="src-count"></span></button>
+          </span>
+          <span class="pane-acts"><button type="button" id="side-hide" class="side-hide" title="collapse the sidebar (h) — the results take the space">«</button></span>
+        </div>
+        <div class="side-rail" id="side-rail">
+          <button type="button" data-rail="stats" title="show the quick stats (h)">» <span>STATS</span></button>
+          <button type="button" data-rail="sources" title="show the sources">» <span>SOURCES</span></button>
+        </div>
+        <div class="side-stats" id="side-stats" data-pane-body="stats"></div>
+        <div class="pane-sources" data-pane-body="sources">
+        <div class="spectrum" id="spectrum" title="Share of enabled sources across the spectrum"></div>
+        <div class="src-filter-row"><input id="src-filter" class="src-filter" placeholder="filter sources…" spellcheck="false" /><button id="btn-add" class="btn-add needs-perm-sources-manage" title="add a source (a)">+ ADD</button></div>
+        <div class="src-sort" id="src-sort"><span class="label">sort:</span><button type="button" data-ssort="bias" title="grouped by bias, left → right">BIAS</button><button type="button" data-ssort="votes" title="highest voted first">VOTES</button><button type="button" data-ssort="name" title="alphabetical">A–Z</button><button type="button" data-ssort="items" title="most items in the live feeds first">ITEMS</button><button type="button" data-ssort="status" title="failing and disabled feeds first">STATUS</button></div>
+        <div id="src-list" class="src-list"></div>
+        <div class="pane-foot dim">▲▼ vote a source to rank its stories higher/lower. click a name to view only that source.</div>
+        </div>
+      </aside>
+
+      <main class="feed">
+        <div id="active-filter" class="active-filter" hidden></div>
+        <div id="feed-list" class="feed-list"></div>
+        <div id="feed-empty" class="empty" hidden></div>
+        <nav id="pager" class="pager" hidden></nav>
+        <button type="button" id="to-top" class="to-top" hidden title="back to top (Home)">▲ top</button>
+      </main>
+
+      <aside class="binder-side" id="binder-side" aria-label="research binder"></aside>
+    </div>
+
+    <footer class="console">
+      <div id="log" class="log" tabindex="-1"></div>
+      <label class="cmd ac-host">
+        <span class="prompt">root@stringer:~$</span>
+        <input id="cmd" autocomplete="off" spellcheck="false" placeholder="type 'help'  ( : )" />
+      </label>
+    </footer>
+  </div>
+
+  <dialog id="dlg-source">
+    <form method="dialog" id="form-source" class="dlg">
+      <div class="dlg-head"><span id="dlg-title">// ADD SOURCE</span><button value="cancel" class="link" formnovalidate title="close (esc)">[esc]</button></div>
+      <label class="field">
+        <span>site or feed url</span>
+        <div class="row">
+          <input name="url" id="f-url" placeholder="https://example.com  or  https://example.com/feed" spellcheck="false" />
+          <button type="button" id="btn-discover">DISCOVER</button>
+        </div>
+      </label>
+      <pre id="discover-out" class="discover-out" hidden></pre>
+      <label class="field"><span>feed url</span><input name="feed" id="f-feed" required spellcheck="false" /></label>
+      <label class="field"><span>display name</span><input name="name" id="f-name" required maxlength="80" /></label>
+      <div class="field">
+        <span>bias rating</span>
+        <div class="bias-pick" id="f-bias">
+          <label class="b-L"><input type="radio" name="bias" value="-2" />LEFT</label>
+          <label class="b-LL"><input type="radio" name="bias" value="-1" />LEAN L</label>
+          <label class="b-C"><input type="radio" name="bias" value="0" checked />CENTER</label>
+          <label class="b-LR"><input type="radio" name="bias" value="1" />LEAN R</label>
+          <label class="b-R"><input type="radio" name="bias" value="2" />RIGHT</label>
+        </div>
+      </div>
+      <div class="field">
+        <span>media type</span>
+        <div class="bias-pick">
+          <label><input type="radio" name="type" value="legacy" />LEGACY</label>
+          <label><input type="radio" name="type" value="new" checked />NEW MEDIA</label>
+        </div>
+      </div>
+      <div class="field edit-only" id="f-edit-extra">
+        <span>danger zone</span>
+        <div class="row">
+          <button type="button" id="btn-reset-votes">RESET VOTES</button>
+          <button type="button" id="btn-delete" class="danger">DELETE SOURCE</button>
+        </div>
+      </div>
+      <div id="f-error" class="err" hidden></div>
+      <div class="dlg-foot">
+        <button value="cancel" formnovalidate>CANCEL</button>
+        <button id="btn-save" value="save" class="primary">ADD SOURCE ⏎</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-confirm" class="confirm-dlg">
+    <form method="dialog" class="dlg">
+      <div class="dlg-head"><span>// CLEAR QUERY?</span><button value="cancel" class="link" title="cancel (esc)">[esc]</button></div>
+      <div>Clear the current query and show everything?</div>
+      <code id="cf-query" class="cf-query"></code>
+      <div class="dlg-foot">
+        <button value="cancel">CANCEL <span class="dim">esc</span></button>
+        <button value="ok" class="primary" autofocus>CLEAR ⏎</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-query">
+    <form method="dialog" id="form-query" class="dlg">
+      <div class="dlg-head"><span id="dq-title">// SAVE QUERY</span><button value="cancel" class="link" formnovalidate title="close (esc)">[esc]</button></div>
+      <label class="field"><span>name</span><input name="name" id="dq-name" maxlength="60" placeholder="e.g. Nvidia from the right" autocomplete="off" /></label>
+      <label class="field"><span>query</span><input name="query" id="dq-query" class="mono-q" required spellcheck="false" autocomplete="off" /></label>
+      <div id="dq-check" class="dq-check"></div>
+      <label class="check"><input type="checkbox" name="pinned" id="dq-pinned" checked /> pin as a tab</label>
+      <label class="check"><input type="checkbox" name="view" id="dq-view" /> also remember view <span class="dim" id="dq-view-desc"></span></label>
+      <div class="field edit-only"><span>danger zone</span><div class="row"><button type="button" id="dq-delete" class="danger">DELETE SAVED QUERY</button></div></div>
+      <div id="dq-error" class="err" hidden></div>
+      <div class="dlg-foot">
+        <button value="cancel" formnovalidate>CANCEL</button>
+        <button value="save" id="dq-save" class="primary">SAVE ⏎</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-archive" class="wide-dlg">
+    <div class="dlg" id="archive-body"></div>
+  </dialog>
+
+  <dialog id="dlg-stats" class="wide-dlg stats-dlg">
+    <div class="dlg" id="stats-body"></div>
+  </dialog>
+
+  <dialog id="dlg-advanced" class="wide-dlg">
+    <div class="dlg" id="advanced-body"></div>
+  </dialog>
+
+  <dialog id="dlg-story" class="story-dlg">
+    <div id="story-body" tabindex="-1"></div>
+  </dialog>
+
+  <dialog id="dlg-article" class="story-dlg">
+    <div id="article-body" tabindex="-1"></div>
+  </dialog>
+
+  <dialog id="dlg-reader" class="reader-dlg">
+    <div id="reader-body" tabindex="-1"></div>
+  </dialog>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

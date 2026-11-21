@@ -1,0 +1,28 @@
+# docker compose up -d --build   →   open http://localhost:1337 and follow the setup wizard
+name: stringer
+services:
+  stringer:
+    build: .
+    image: stringer:latest
+    container_name: stringer
+    restart: unless-stopped
+    ports:
+      - "${STRINGER_PORT:-1337}:1337"   # STRINGER_PORT=8080 docker compose up -d  to use another host port
+    volumes:
+      - stringer-data:/data          # outlets, accounts and the archive (can grow to 10+ GB with the backfill)
+    environment:
+      # Public URL people use to reach the server — needed for single sign-on redirects behind a proxy.
+      # BASE_URL: "https://news.example.org"
+      # SITE_NAME: "STRINGER"
+      # Single sign-on (any OpenID Connect provider). Can also be set in the admin panel instead.
+      # OIDC_ISSUER: "https://auth.example.org/application/o/stringer/"
+      # OIDC_CLIENT_ID: "stringer"
+      # OIDC_CLIENT_SECRET: "change-me"
+      # OIDC_LABEL: "Sign in with Authentik"
+      # OIDC_ADMIN_GROUP: "stringer-admins"   # members of this group become admins
+      # LOCAL_LOGIN: "false"                 # SSO only (keep it on until SSO works!)
+      # BACKFILL: "0"                         # never crawl history
+      # FULLTEXT: "0"                         # never save article text to the morgue
+      REFRESH_MIN: "10"                       # minutes between feed syncs
+volumes:
+  stringer-data:

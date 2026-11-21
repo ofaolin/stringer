@@ -1,0 +1,10 @@
+# runtime data: databases (archive, accounts, sessions, settings incl. any OIDC secret), feeds config
+data/
+node_modules/
+*.log
+.env
+.env.*
+.DS_Store
+# local test leftovers
+chr*/
+/logo.png

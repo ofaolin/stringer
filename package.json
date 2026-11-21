@@ -1,0 +1,14 @@
+{
+  "name": "stringer",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node bin/run.js",
+    "serve": "node --disable-warning=ExperimentalWarning server.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "AGPL-3.0-or-later"
+}
