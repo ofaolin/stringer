@@ -50,6 +50,13 @@ HOST=0.0.0.0 npm start    # listen on every interface (put a TLS reverse proxy i
 | `STRINGER_SETUP_TOKEN` | random | use this setup code instead of a generated one (only matters before setup) |
 | `STRINGER_ALLOW_PRIVATE_FETCH` | off | `1` lets the reader and feed fetcher reach private / local addresses (e.g. a feed on your LAN). Off, they only fetch public addresses, re-checking every redirect, so links can't be used to probe your network |
 
+**Outlets without an RSS feed:** a **news sitemap** works as a feed — many outlets publish one for search engines
+(look for `Sitemap:` lines in their `robots.txt`, e.g. `https://www.cnn.com/sitemap/news.xml`): real article links,
+headlines and dates. A **Google News** feed (`news.google.com/rss/search?q=site:…`) works too, but less well: its
+headlines' " - Outlet" suffix is dropped, but Google doesn't put the article's own address in its feeds, so the reader
+and the morgue can't fetch the text (it's filed as a fragment). An outlet's feed can be changed in its settings — moving
+from Google News to a news sitemap keeps its history.
+
 Behind a reverse proxy, forward `X-Forwarded-Proto` (session cookies are marked `Secure` over https) or set `BASE_URL`.
 
 **Security notes.** Failed sign-ins back off (per address and per username; `429` with `Retry-After`), and so do

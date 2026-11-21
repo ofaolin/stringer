@@ -2242,7 +2242,7 @@ function openSourceDialog(src = null, prefillUrl = '') {
   $('#f-error').hidden = true;
   $('#discover-out').hidden = true;
   $('#f-url').closest('.field').hidden = !!src;
-  $('#f-feed').readOnly = !!src;
+  $('#f-feed').readOnly = false;                         // (an outlet can move to another feed — e.g. off Google News)
   if (src) {
     $('#f-feed').value = src.feed;
     $('#f-name').value = src.name;

@@ -110,12 +110,19 @@ function saveDb() {
 const byId = (id) => db.sources.find((s) => s.id === id);
 
 // ───────────────────────── fetching ─────────────────────────
+// a Google News headline's " - Outlet" suffix (the parser drops it using the item's <source>; some items don't have one)
+const GNEWS = /^https?:\/\/news\.google\.com\//i;
+function stripOutletSuffix(title, name) {
+  if (!name) return title;
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return title.replace(new RegExp(`\\s*(?:^|\\s)[-–—|]\\s*${esc}(?:\\s+(?:en Español|Press Room|Underscored))?\\s*$`, 'i'), '').trim();
+}
 async function refreshOne(s) {
   const t0 = Date.now();
   try {
     const feed = await fetchFeed(s.feed);
     const now = Date.now();
-    const items = feed.items.slice(0, 60).map((it) => {
+    const items = feed.items.slice(0, 60).map((it) => (GNEWS.test(it.link) ? { ...it, title: stripOutletSuffix(it.title, s.name) } : it)).filter((it) => it.title && !(GNEWS.test(it.link) && /^[\w.-]+\.(txt|html?|php|xml|json)$/i.test(it.title))).map((it) => {
       let date = it.date;
       if (!date) {
         if (!firstSeen.has(it.link)) firstSeen.set(it.link, now);
@@ -123,6 +130,12 @@ async function refreshOne(s) {
       }
       return { ...it, date: Math.min(date, now), id: hash(it.link), sourceId: s.id };
     });
+    // items without a summary (a news sitemap has none) use the one the archive filled from the article's page
+    const bare = items.filter((it) => !it.summary);
+    if (bare.length && archive) {
+      try { const sums = archive.summariesFor(bare.map((it) => it.link)); for (const it of bare) it.summary = sums.get(normalizeUrl(it.link)) || ''; }
+      catch (e) { console.error('[archive] summaries', e.message); }
+    }
     cache.set(s.id, { items, fetchedAt: now, error: null, ms: now - t0 });
     hold(s.id, items, true);
     try {
@@ -152,6 +165,37 @@ function pruneHeld() {
   }
 }
 // startup: the last LIVE_DAYS of real-headline articles from the archive (live feeds, Wayback feed snapshots, HN)
+// once: Google News headlines filed before the feed parser dropped their " - Outlet" suffix lose it (in the catalog
+// and in their fragments); ones that were nothing but the suffix go — unless someone's binder cites them
+function cleanGoogleNewsTitles() {
+  if (!archive || archive.kv('gnewsTitlesCleaned') === 2) return;
+  const rows = archive.db.prepare("SELECT id, source_id, title FROM articles WHERE link LIKE 'https://news.google.com/%'").all();
+  const cited = new Set(accounts.db.prepare('SELECT morgue FROM binder WHERE morgue IS NOT NULL').all().map((r) => r.morgue));
+  let fixed = 0, dropped = 0;
+  archive.db.exec('BEGIN IMMEDIATE');
+  try {
+    for (const r of rows) {
+      const name = byId(r.source_id)?.name;
+      if (!name) continue;
+      const t = stripOutletSuffix(r.title, name);
+      if (t === r.title) continue;
+      if (!t) {
+        if (cited.has(archive.morgueOf(r.id))) continue;
+        archive.db.prepare('DELETE FROM bodies WHERE id = ?').run(r.id);
+        archive.db.prepare('DELETE FROM articles WHERE id = ?').run(r.id);
+        dropped++;
+        continue;
+      }
+      archive.db.prepare('UPDATE articles SET title = ? WHERE id = ?').run(t, r.id);
+      const b = archive.db.prepare('SELECT meta FROM bodies WHERE id = ?').get(r.id);
+      if (b?.meta) { try { const m = JSON.parse(b.meta); if (m.title) { m.title = t; archive.db.prepare('UPDATE bodies SET meta = ? WHERE id = ?').run(JSON.stringify(m), r.id); } } catch {} }
+      fixed++;
+    }
+    archive.kv('gnewsTitlesCleaned', 2);
+    archive.db.exec('COMMIT');
+    if (fixed || dropped) console.log(`[archive] Google News headlines: ${fixed} cleaned, ${dropped} without a headline removed`);
+  } catch (e) { archive.db.exec('ROLLBACK'); console.error('[archive] Google News headline cleanup failed:', e.message); }
+}
 function seedLive() {
   if (!archive) return;
   const t0 = Date.now();
@@ -239,8 +283,14 @@ function collectArticles({ hours, sourceId }) {
   for (const s of db.sources) {
     if (!s.enabled) continue;
     if (sourceId && s.id !== sourceId) continue;
-    for (const it of held.get(s.id)?.values() || []) {
+    const items = [...(held.get(s.id)?.values() || [])];
+    // an outlet that moved off Google News (or has both): its old Google-redirect copy of an article it now lists
+    // with its real address is dropped, so the article doesn't show twice
+    const realTitles = items.some((it) => /^https?:\/\/news\.google\.com\//i.test(it.link))
+      ? new Set(items.filter((it) => !/^https?:\/\/news\.google\.com\//i.test(it.link)).map((it) => it.title.trim().toLowerCase())) : null;
+    for (const it of items) {
       if (it.date < cutoff || seen.has(it.link)) continue;
+      if (realTitles?.has(it.title.trim().toLowerCase()) && /^https?:\/\/news\.google\.com\//i.test(it.link)) continue;
       seen.add(it.link);
       out.push({ ...it });
     }
@@ -1799,6 +1849,18 @@ async function handleApi(req, res, url) {
       if (b.name !== undefined) s.name = String(b.name).trim().slice(0, 80) || s.name;
       if (b.bias !== undefined) { if (!validBias(Number(b.bias))) return send(res, 400, { error: 'bias must be -2..2' }); s.bias = Number(b.bias); }
       if (b.type !== undefined) s.type = b.type === 'legacy' ? 'legacy' : 'new';
+      // a new feed address (e.g. moving an outlet off Google News to its own news sitemap): it has to parse as a feed
+      let feedChanged = false;
+      if (b.feed !== undefined && String(b.feed).trim() !== s.feed) {
+        const feed = String(b.feed).trim();
+        if (!/^https?:\/\//i.test(feed)) return send(res, 400, { error: 'feed must be an http(s) URL' });
+        if (db.sources.some((x) => x !== s && x.feed === feed)) return send(res, 409, { error: 'that feed is already a source' });
+        try { await fetchFeed(feed); } catch (e) { return send(res, 422, { error: `feed check failed: ${e.message}` }); }
+        s.feed = feed;
+        // an outlet that pointed at news.google.com takes the new feed's own site
+        if (/^https?:\/\/news\.google\.com/i.test(s.site || '') || !s.site) s.site = new URL(feed).origin;
+        feedChanged = true;
+      }
       const sm = cleanSourceMode(b.morgueMode);
       if (sm.error) return send(res, 400, { error: sm.error });
       if (!sm.skip && (s.morgueMode || undefined) !== sm.mode) {
@@ -1810,6 +1872,7 @@ async function handleApi(req, res, url) {
         if (s.enabled && !cache.has(s.id)) refreshOne(s);
       }
       await saveDb();
+      if (feedChanged) { cache.delete(s.id); await refreshOne(s); }
       return send(res, 200, sourceView(s, ctx));
     }
 
@@ -1917,6 +1980,7 @@ server.listen(PORT, HOST, () => {
   console.log(`\n  ▓▓ STRINGER online → http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}\n`);
   issueSetupToken();
   console.log(REGEX_MODE === 'linear' ? '[query] regex terms: linear-time engine' : '[query] regex terms are OFF — start with --enable-experimental-regexp-engine (npm start does)');
+  cleanGoogleNewsTitles();
   seedLive();
   refreshAll();
   setInterval(refreshAll, REFRESH_MS);
