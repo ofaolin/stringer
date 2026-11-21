@@ -1385,6 +1385,7 @@ async function handleApi(req, res, url) {
       return r;
     };
     if (ctx.user && link) { try { accounts.setRead(ctx.user.id, normalizeUrl(link), true); readCache.delete(ctx.user.id); } catch {} }   // reading it = read
+    let readFresh = false;
     if (stored) stored.filedBy = filerName(stored.filedBy);
     if (stored?.ok) return send(res, 200, finish(stored));         // archived copy (also survives paywalls / deleted pages)
     if (!ctx.perms.has('reader.fetch')) {
@@ -1394,9 +1395,12 @@ async function handleApi(req, res, url) {
     try {
       // dead links (404 / redirected to the front page) fall back to the Wayback Machine copy nearest the publish date
       // archive articles (older than the live window, or indexed from the archive's sources) fall back to the
-      // Wayback copy whenever the original can't be read; live ones only when the page is gone
+      // Wayback copy whenever the original can't be read; live ones when the page is gone or the site refuses us —
+      // unless it's only hours old (archive.org won't have it yet: say so rather than wait on a lookup)
       const archived = !!row && (row.published < Date.now() - LIVE_DAYS * 864e5 || row.origin !== 'live');
-      let r = await readArticle(link, { wayback: true, anyFailure: archived, date: row?.published ?? (Number(url.searchParams.get('date')) || null) });
+      const pubTs = row?.published ?? (Number(url.searchParams.get('date')) || null);
+      readFresh = !!pubTs && Date.now() - pubTs < 6 * 3600e3;
+      let r = await readArticle(link, { wayback: true, anyFailure: archived, onRefusal: !readFresh, date: pubTs });
       // removed from the morgue (or deleted) by hand: shown, not filed again
       const tomb = archive?.tombstone(link);
       if (tomb) return send(res, 200, finish({ ...r, notFiled: tomb === 'deleted' ? 'deleted' : 'removed' }));
@@ -1420,7 +1424,9 @@ async function handleApi(req, res, url) {
       if (stored) return send(res, 200, stored);
       // the page couldn't be read, but the article may be filed (as a fragment): say so, so the reader shows its tag
       const no = id != null ? archive?.morgueOf(id) : null;
-      return send(res, 502, { error: e.message, ...(no ? { morgue: no, fragment: true, archived: archive.bodyState(id)?.fetched || null } : {}) });
+      const why = readFresh && /HTTP (401|403|451)\b/.test(e.message) && !/Wayback/.test(e.message)
+        ? `${e.message} — and it's too new for the Wayback Machine (archive.org captures news pages hours to days after they're published; it's looked up again later)` : e.message;
+      return send(res, 502, { error: why, ...(no ? { morgue: no, fragment: true, archived: archive.bodyState(id)?.fetched || null } : {}) });
     }
   }
 
