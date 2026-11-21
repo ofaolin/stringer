@@ -264,6 +264,15 @@ function floatLog(line) {
   setTimeout(() => div.classList.add('out'), 4500);
   setTimeout(() => { div.remove(); if (!floatBox.children.length) try { floatBox.hidePopover(); } catch {} }, 5000);
 }
+// the last popover closed: the terminal is visible again and already shows these lines — drop the floating copies
+// (otherwise e.g. saving an outlet logs while its dialog is still open, and both show at once, overlapping)
+document.addEventListener('close', () => {
+  setTimeout(() => {
+    if (document.querySelector('dialog[open]') || !floatBox.children.length) return;
+    floatBox.replaceChildren();
+    try { floatBox.hidePopover(); } catch {}
+  }, 0);
+}, true);
 
 // console collapses when unfocused; new messages "peek" briefly while collapsed
 const consoleEl = $('.console');
