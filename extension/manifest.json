@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "STRINGER — file to the morgue",
+  "version": "1.0.0",
+  "description": "Files the article you're reading into your STRINGER server's morgue, as your browser shows it.",
+  "action": { "default_popup": "popup.html", "default_title": "File this page in the STRINGER morgue (Alt+Shift+F)" },
+  "permissions": ["activeTab", "scripting", "storage"],
+  "commands": {
+    "_execute_action": { "suggested_key": { "default": "Alt+Shift+F" }, "description": "File the current page in the STRINGER morgue" }
+  },
+  "browser_specific_settings": { "gecko": { "id": "file-to-morgue@stringer.local", "strict_min_version": "115.0" } }
+}

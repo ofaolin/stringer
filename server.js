@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { fetchFeed, discoverFeed } from './lib/feeds.js';
+import { fetchFeed, discoverFeed, isGoogleNewsLink } from './lib/feeds.js';
 import { DEFAULT_SOURCES } from './lib/default-sources.js';
 import { clusterArticles, storiesFromClusters, sourceWeight, tokenize } from './lib/cluster.js';
 import { ClusterWorker } from './lib/cluster-worker.js';
@@ -19,7 +19,7 @@ import { BackfillWorker } from './lib/backfill-worker.js';
 import { HarvestWorker } from './lib/harvest-worker.js';
 import { prefilter, plans as archivePlans, usesStoryFields, usesBodyFields, hasDateConstraint } from './lib/archive-query.js';
 import { computeStats } from './lib/stats.js';
-import { readArticle } from './lib/reader.js';
+import { readArticle, extract } from './lib/reader.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
@@ -945,12 +945,12 @@ function send(res, code, body) {
   else zlib.gzip(data, { level: 5 }, done);
 }
 
-async function readBody(req) {
+async function readBody(req, limit = 64 * 1024) {
   let size = 0;
   const chunks = [];
   for await (const c of req) {
     size += c.length;
-    if (size > 64 * 1024) throw Object.assign(new Error('body too large'), { status: 413 });
+    if (size > limit) throw Object.assign(new Error('body too large'), { status: 413 });
     chunks.push(c);
   }
   if (!chunks.length) return {};
@@ -1144,9 +1144,111 @@ async function handleOidc(req, res, url) {
   }
 }
 
+// ── the browser extension ── files the page you're reading (as your browser shows it — subscriber pages included)
+// into the morgue. Authenticated by a filing key (made in the account menu), never by cookies, so it's open to
+// cross-origin requests; a key can only do this. Only pages from outlets this server follows are accepted, and the
+// page goes through the same extraction / sanitizing as the reader.
+const extHits = new Map();                        // user id → recent filing times (60 per 10 minutes)
+function sourceForUrl(link) {
+  let host;
+  try { host = new URL(link).hostname.replace(/^www\./, '').toLowerCase(); } catch { return null; }
+  const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, '').toLowerCase(); } catch { return ''; } };
+  return db.sources.find((s) => { const h = hostOf(s.site); return h && h !== 'news.google.com' && (host === h || host.endsWith('.' + h)); })
+    || db.sources.find((s) => { const h = hostOf(s.feed); return h && h !== 'news.google.com' && !/^(feeds?|rss)\./.test(h) && (host === h || host.endsWith('.' + h)); }) || null;
+}
+// GET /api/extension.zip — the extension/ folder as a zip (stored, no compression: no dependencies needed), to unzip
+// and "Load unpacked". Built once per server start.
+let extZip = null;
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const crc32 = (buf) => { let c = 0xffffffff; for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+function buildExtensionZip() {
+  const dir = path.join(ROOT, 'extension'), top = 'stringer-extension/';
+  const files = fsSync.readdirSync(dir).filter((f) => fsSync.statSync(path.join(dir, f)).isFile()).sort();
+  const locals = [], centrals = [];
+  let offset = 0;
+  for (const f of files) {
+    const data = fsSync.readFileSync(path.join(dir, f)), name = Buffer.from(top + f), crc = crc32(data);
+    const lh = Buffer.alloc(30);
+    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x0800, 6); lh.writeUInt16LE(0, 8);
+    lh.writeUInt32LE(0, 10); lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22);
+    lh.writeUInt16LE(name.length, 26); lh.writeUInt16LE(0, 28);
+    locals.push(lh, name, data);
+    const ch = Buffer.alloc(46);
+    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x0800, 8); ch.writeUInt16LE(0, 10);
+    ch.writeUInt32LE(0, 12); ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(data.length, 24);
+    ch.writeUInt16LE(name.length, 28); ch.writeUInt32LE(0o100644 * 0x10000, 38); ch.writeUInt32LE(offset, 42);
+    centrals.push(ch, name);
+    offset += 30 + name.length + data.length;
+  }
+  const cd = Buffer.concat(centrals), end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(files.length, 8); end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...locals, cd, end]);
+}
+async function handleExtension(req, res, parts, m) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Max-Age', '600');
+  if (m === 'OPTIONS') { res.writeHead(204); return res.end(); }
+  const key = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+  const user = accounts.filingKeyUser(key);
+  if (!user) return send(res, 401, { error: 'this filing key isn\'t valid (it may have been revoked) — make a new one in STRINGER: account menu → Browser extension' });
+  const perms = accounts.rolePerms(user.role);
+  const site = accounts.settings().siteName;
+  if (parts[1] === 'whoami' && m === 'GET') return send(res, 200, { user: user.display || user.username, username: user.username, site, canFile: perms.has('reader.fetch') && !!archive });
+  if (parts[1] !== 'file' || m !== 'POST') return send(res, 404, { error: 'not found' });
+  if (!perms.has('reader.fetch')) return send(res, 403, { error: "your role can't file articles" });
+  if (!archive) return send(res, 503, { error: 'the archive is unavailable' });
+  const now = Date.now(), ts = (extHits.get(user.id) || []).filter((t) => now - t < 600e3);
+  if (ts.length >= 60) return send(res, 429, { error: 'too many pages filed in the last 10 minutes — try again shortly' });
+  ts.push(now); extHits.set(user.id, ts);
+  const b = await readBody(req, 8 * 1024 * 1024);
+  const link = String(b.url || '').trim();
+  if (!/^https?:\/\/[^/]+/i.test(link)) return send(res, 400, { error: 'the page address is missing' });
+  if (isGoogleNewsLink(link)) return send(res, 422, { error: 'that\'s a Google News page — open the article itself, then file it' });
+  if (typeof b.html !== 'string' || b.html.length < 200) return send(res, 400, { error: 'the page content is missing' });
+  const src = sourceForUrl(link);
+  if (!src) return send(res, 422, { error: `${new URL(link).hostname.replace(/^www\./, '')} isn't one of the outlets this server follows` });
+  if (archive.tombstone(link) === 'deleted') return send(res, 409, { error: 'that article was deleted from the archive' });
+  let r;
+  try { r = extract(b.html, link); } catch (e) { return send(res, 422, { error: `couldn't read the page: ${e.message}` }); }
+  if (!r.content || r.words < 40) return send(res, 422, { error: 'no article text found on this page — open the article itself (not a section or home page)' });
+  // the headline without the site's name tacked on ("… | CNN Politics", "… - The Washington Post")
+  let title = String(r.title || b.title || '').replace(/\s+/g, ' ').trim();
+  for (const n of [r.site, src.name].filter(Boolean)) {
+    const esc = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    title = title.replace(new RegExp(`\\s*[|\\-–—:·]\\s*(?:the\\s+)?${esc.replace(/^the\s+/i, '')}(?:\\s+[\\w ]{0,20})?\\s*$`, 'i'), '').trim() || title;
+  }
+  let id = archive.articleId(link);
+  if (id == null) {
+    const pub = Date.parse(r.published || '');
+    archive.insertMany([{ link, sourceId: src.id, title: title.slice(0, 500) || link, summary: String(r.excerpt || '').slice(0, 1000), image: r.image || null,
+      date: Number.isFinite(pub) ? pub : now, quality: 2, origin: 'extension' }]);
+    id = archive.articleId(link);
+    if (id == null) return send(res, 500, { error: "couldn't add it to the archive" });
+  }
+  archive.clearTombstone(link, 'nofile');                    // filing it on purpose re-files a removed one
+  const have = archive.db.prepare('SELECT status, words, morgue FROM bodies WHERE id = ?').get(id);
+  if (have && (have.status === 'ok' || have.status === 'partial') && (have.words || 0) >= r.words) {
+    return send(res, 200, { filed: false, morgue: have.morgue, words: have.words, title, outlet: src.name, note: 'already in the morgue with as much text — kept the copy it has' });
+  }
+  archive.saveBody(id, { ...r, url: link }, `user:${user.id}`);
+  const after = archive.db.prepare('SELECT status, words, morgue FROM bodies WHERE id = ?').get(id);
+  console.log(`[morgue] ${user.username} filed ${link} from the browser (${after?.words || 0} words)`);
+  return send(res, 200, { filed: true, morgue: after?.morgue, words: after?.words || 0, status: after?.status, title, outlet: src.name, replaced: !!have?.morgue,
+    filedBy: filerName(archive.filedByOf(id)) });
+}
+
 async function handleApi(req, res, url) {
   const parts = url.pathname.split('/').filter(Boolean).slice(1); // drop 'api'
   const m = req.method;
+  if (parts[0] === 'ext') return handleExtension(req, res, parts, m);
+  if (parts[0] === 'extension.zip' && m === 'GET') {
+    try { extZip ??= buildExtensionZip(); } catch (e) { return send(res, 404, { error: 'the extension isn\'t included with this server' }); }
+    res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': 'attachment; filename="stringer-extension.zip"', 'Content-Length': extZip.length, 'Cache-Control': 'no-cache' });
+    return res.end(extZip);
+  }
   // writes must come from our own page (a cross-site form can't set this header)
   // (/api/read too, though a GET: it fetches pages and marks them read — a cross-site link mustn't trigger it)
   if ((m !== 'GET' || parts[0] === 'read') && req.headers['x-requested-with'] !== 'stringer') return send(res, 403, { error: 'missing X-Requested-With header' });
@@ -1274,6 +1376,18 @@ async function handleApi(req, res, url) {
     if (b.rankMode !== undefined) prefs.rankMode = b.rankMode === 'personal' ? 'personal' : 'community';
     accounts.updateUser(ctx.user.id, { prefs, ...(b.display !== undefined ? { display: b.display } : {}) });
     return send(res, 200, meView(requestCtx(req, new URL(url.pathname, 'http://x'))));
+  }
+  // filing keys for the browser extension (yours; the key itself is shown once, when it's made)
+  if (parts[0] === 'me' && parts[1] === 'filing-keys') {
+    if (!ctx.user) return send(res, 401, { error: 'sign in first' });
+    need(ctx, 'reader.fetch');
+    if (m === 'GET' && !parts[2]) return send(res, 200, { keys: accounts.filingKeys(ctx.user.id) });
+    if (m === 'POST' && !parts[2]) {
+      const b = await readBody(req);
+      try { return send(res, 201, accounts.createFilingKey(ctx.user.id, b.name)); } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+    if (m === 'DELETE' && parts[2]) return send(res, accounts.revokeFilingKey(ctx.user.id, parts[2]) ? 200 : 404, { ok: true });
+    return send(res, 405, { error: 'method not allowed' });
   }
   if (parts[0] === 'me' && parts[1] === 'password' && m === 'POST') {
     if (!ctx.user) return send(res, 401, { error: 'sign in first' });

@@ -50,6 +50,15 @@ HOST=0.0.0.0 npm start    # listen on every interface (put a TLS reverse proxy i
 | `STRINGER_SETUP_TOKEN` | random | use this setup code instead of a generated one (only matters before setup) |
 | `STRINGER_ALLOW_PRIVATE_FETCH` | off | `1` lets the reader and feed fetcher reach private / local addresses (e.g. a feed on your LAN). Off, they only fetch public addresses, re-checking every redirect, so links can't be used to probe your network |
 
+**Browser extension (file what you're reading):** for outlets that turn STRINGER away, and subscriber articles you're
+signed in to, the `extension/` folder is a small browser extension (Chrome, Edge, Brave; Firefox as a temporary add-on).
+Account menu → **browser extension…** links the download (`/api/extension.zip`), shows the server address, and makes
+a **filing key**. A filing key can only file articles in your name (it can't do anything else with your account);
+only its hash is stored, and you can revoke it there. Clicking the extension (or **Alt+Shift+F**) sends the current
+tab, as your browser shows it, to `POST /api/ext/file`. The server runs it through the reader's extraction and
+sanitizing, only accepts pages from outlets it follows, files it in your name, and never replaces a fuller copy with a
+shorter one. The extension only reads the tab you file, when you click (`activeTab`). It needs `reader.fetch`.
+
 **Outlets without an RSS feed:** a **news sitemap** works as a feed — many outlets publish one for search engines
 (look for `Sitemap:` lines in their `robots.txt`, e.g. `https://www.cnn.com/sitemap/news.xml`): real article links,
 headlines and dates. A **Google News** feed (`news.google.com/rss/search?q=site:…`) works too, but less well: its

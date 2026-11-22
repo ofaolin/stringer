@@ -72,6 +72,7 @@ export function createAuth(ctx) {
       <div class="um-head">${esc(u.display)} <span class="dim">@${esc(u.username)} · ${esc(u.role)}</span></div>
       ${can('vote.personal') ? `<button type="button" data-um="rank">ranking: ${me.rank.mode === 'community' ? '<b>community</b> / personal' : 'community / <b>personal</b>'}</button>` : ''}
       ${can('users.manage') || can('settings.manage') ? '<button type="button" data-um="admin">admin panel…</button>' : ''}
+      ${can('reader.fetch') ? '<button type="button" data-um="extension">browser extension…</button>' : ''}
       ${u.password ? '<button type="button" data-um="password">change password…</button>' : ''}
       <button type="button" data-um="logout">sign out</button>`;
     const r = anchor.getBoundingClientRect();
@@ -85,6 +86,7 @@ export function createAuth(ctx) {
       if (a === 'rank') switchRank();
       else if (a === 'admin') openAdmin();
       else if (a === 'password') openPassword();
+      else if (a === 'extension') openExtension();
       else if (a === 'logout') { await api('auth/logout', { method: 'POST' }); location.reload(); }
     });
   }
@@ -147,6 +149,49 @@ export function createAuth(ctx) {
     };
     d.showModal();
     d.querySelector('input').focus();
+  }
+
+  // ── the browser extension: file the page you're reading (subscriber pages too) with a filing key ──
+  async function openExtension() {
+    const d = dialog('dlg-extension');
+    let made = null, msg = '';
+    const ago = (t) => { if (!t) return 'never'; const m = Math.round((Date.now() - t) / 60e3); return m < 1 ? 'just now' : m < 60 ? `${m}m ago` : m < 1440 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`; };
+    const render = async () => {
+      let keys = [];
+      try { keys = (await api('me/filing-keys')).keys; } catch (e) { msg = e.message; }
+      d.innerHTML = `<div class="dlg ext-dlg">
+        <div class="st-head"><div class="dlg-head"><span>// BROWSER EXTENSION</span><button type="button" class="link" data-act="close" title="close (esc)">[esc]</button></div></div>
+        <p class="dim">File the article you're reading into the morgue, as your browser shows it — including pages from outlets that turn STRINGER away, and subscriber articles you're signed in to. It only reads the tab you file, when you click.</p>
+        <div class="ext-step"><b>1 · install it</b> — <a href="/api/extension.zip" download>download the extension (.zip)</a>, unzip it, then:
+          <div class="dim small">Chrome / Edge / Brave: <code>chrome://extensions</code> → turn on Developer mode → <b>Load unpacked</b> → pick the unzipped folder.<br>
+          Firefox: <code>about:debugging#/runtime/this-firefox</code> → <b>Load Temporary Add-on</b> → pick <code>manifest.json</code> (Firefox forgets it on restart).</div></div>
+        <div class="ext-step"><b>2 · server address</b> — paste into the extension's settings: <code class="ext-copy" data-copy="${esc(location.origin)}" title="click to copy">${esc(location.origin)}</code></div>
+        <div class="ext-step"><b>3 · a filing key</b> — it can only file articles in your name; revoke it here any time.
+          <div class="ext-make"><input data-key-name maxlength="40" placeholder="name it, e.g. laptop chrome" /> <button type="button" data-act="make">MAKE A KEY</button></div>
+          ${made ? `<div class="ext-new">your new key — copy it now, it won't be shown again:<br><code class="ext-copy ext-key" data-copy="${esc(made.key)}" title="click to copy">${esc(made.key)}</code></div>` : ''}
+          ${msg ? `<div class="err small">${esc(msg)}</div>` : ''}</div>
+        <div class="ext-keys">${keys.length ? keys.map((k) => `<div class="ext-keyrow"><span>${esc(k.name)}</span><span class="dim small">made ${esc(ago(k.created))} · last used ${esc(ago(k.lastUsed))}</span><button type="button" class="link err" data-revoke="${k.id}">[revoke]</button></div>`).join('') : '<div class="dim small">no keys yet</div>'}</div>
+        <div class="st-foot-bar"><span class="dim">esc close · in the browser: click the extension or press <b>Alt+Shift+F</b> to file the page</span><button type="button" data-act="close">CLOSE</button></div>
+      </div>`;
+    };
+    d.onclick = async (e) => {
+      if (e.target === d || e.target.closest('[data-act=close]')) return d.close();
+      const cp = e.target.closest('[data-copy]');
+      if (cp) { try { await navigator.clipboard.writeText(cp.dataset.copy); log('⧉ copied', 'ok'); } catch { log("couldn't copy (clipboard blocked)", 'warn'); } return; }
+      if (e.target.closest('[data-act=make]')) {
+        try { made = await api('me/filing-keys', { method: 'POST', body: { name: d.querySelector('[data-key-name]').value } }); msg = ''; log('🔑 filing key made — paste it into the extension', 'ok'); }
+        catch (err) { msg = err.message; }
+        return render();
+      }
+      const rv = e.target.closest('[data-revoke]');
+      if (rv && confirm('revoke this filing key? the extension using it stops working until you give it a new one')) {
+        try { await api(`me/filing-keys/${rv.dataset.revoke}`, { method: 'DELETE' }); made = null; log('filing key revoked'); } catch (err) { msg = err.message; }
+        return render();
+      }
+    };
+    d.onkeydown = (e) => { if (e.target.matches?.('input')) e.stopPropagation(); if (e.key === 'Enter' && e.target.matches?.('[data-key-name]')) { e.preventDefault(); d.querySelector('[data-act=make]').click(); } };
+    await render();
+    d.showModal();
   }
 
   // ── first run ──

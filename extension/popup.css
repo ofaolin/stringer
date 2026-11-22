@@ -1,0 +1,21 @@
+:root { --bg: #0b0d0b; --bg2: #141814; --fg: #c8f7c5; --fg2: #e9ffe7; --dim: #6f8a6c; --line: #26302a; --warn: #ffd75f; --err: #ff6b6b; --ok: #5fff87; }
+* { box-sizing: border-box; }
+body { margin: 0; width: 360px; background: var(--bg); color: var(--fg); font: 13px/1.5 ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--line); font-weight: 800; letter-spacing: .1em; }
+main { padding: 12px; display: grid; gap: 10px; }
+.link { background: none; border: 0; color: var(--dim); font: inherit; font-size: 12px; cursor: pointer; padding: 0; letter-spacing: 0; font-weight: 400; }
+.link:hover { color: var(--fg); }
+.dim { color: var(--dim); }
+.small { font-size: 11.5px; }
+.title { color: var(--fg2); font-weight: 700; }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.err { color: var(--err); }
+label { display: grid; gap: 3px; font-size: 12px; color: var(--dim); }
+input { background: var(--bg2); border: 1px solid var(--line); color: var(--fg); font: inherit; padding: 4px 8px; }
+input:focus { outline: none; border-color: var(--fg); }
+button.btn { background: transparent; border: 1px solid var(--dim); color: var(--fg); font: inherit; padding: 4px 12px; cursor: pointer; justify-self: start; }
+button.btn:hover { border-color: var(--fg); }
+.morgue { border: 1px solid var(--line); padding: 1px 6px; font-size: 12px; }
+.spin { display: inline-block; animation: spin 1.4s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }

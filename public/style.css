@@ -1449,3 +1449,24 @@ mark.rd-q { padding: 0 1px; }
 mark.rd-q.cur { outline: 2px solid var(--fg); outline-offset: 1px; }
 .rd-qhits { background: transparent; border: 1px solid color-mix(in srgb, var(--warn) 60%, transparent); color: var(--warn); font: inherit; font-size: 11px; padding: 0 6px; cursor: pointer; }
 .rd-qhits:hover { border-color: var(--warn); }
+
+/* account menu → browser extension */
+#dlg-extension { width: min(640px, calc(100vw - 32px)); }
+.ext-dlg { display: grid; gap: 12px; font-size: 13px; position: relative; padding-top: 0; padding-bottom: 0; }
+.ext-dlg .st-foot-bar { flex-wrap: nowrap; }
+.ext-dlg .st-foot-bar > span { flex: 1; min-width: 0; }
+.ext-dlg p { margin: 0; }
+.ext-step { display: block; line-height: 1.6; }
+.ext-step > div { margin-top: 6px; }
+.ext-step code, .ext-dlg code { background: var(--bg2); border: 1px solid var(--line); padding: 0 5px; font: inherit; font-size: 12px; }
+.ext-copy { cursor: copy; }
+.ext-copy:hover { border-color: var(--fg); }
+.ext-key { display: inline-block; margin-top: 4px; word-break: break-all; color: var(--warn); }
+.ext-make { display: flex; gap: 8px; align-items: center; }
+.ext-make input { flex: 1; background: var(--bg2); border: 1px solid var(--line); color: var(--fg); font: inherit; font-size: 13px; padding: 3px 8px; }
+.ext-make input:focus { outline: none; border-color: var(--fg); }
+.ext-make button { background: transparent; border: 1px solid var(--dim); color: var(--fg); font: inherit; font-size: 12px; padding: 3px 12px; cursor: pointer; }
+.ext-new { border: 1px dashed var(--warn); padding: 8px 10px; font-size: 12px; }
+.ext-keys { display: grid; gap: 4px; border-top: 1px solid var(--line); padding-top: 8px; }
+.ext-keyrow { display: flex; gap: 10px; align-items: baseline; }
+.ext-keyrow > span:first-child { flex: 1; }

@@ -1324,7 +1324,7 @@ async function removeArticle(a, mode) {
     return true;
   } catch (e) { log(`couldn't ${mode === 'delete' ? 'delete it' : 'remove it'}: ${esc(e.data?.error || e.message)}`, 'err'); return false; }
 }
-const ORIGIN_NAME = { live: 'live feed', wayback: 'Wayback Machine feed snapshot', sitemap: 'outlet sitemap', hn: 'Hacker News' };
+const ORIGIN_NAME = { live: 'live feed', wayback: 'Wayback Machine feed snapshot', sitemap: 'outlet sitemap', hn: 'Hacker News', extension: 'filed from a browser (STRINGER extension)' };
 async function mountDetails(slotId, a) {
   const slot = document.getElementById(slotId);
   if (!slot || !a?.link) return;

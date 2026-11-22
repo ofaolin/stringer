@@ -6,6 +6,7 @@ COPY package.json ./
 COPY bin ./bin
 COPY lib ./lib
 COPY public ./public
+COPY extension ./extension
 COPY server.js ./
 
 # everything the server writes (outlets, accounts, the archive) lives in /data — mount a volume there
