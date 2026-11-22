@@ -22,7 +22,7 @@ services:
       # OIDC_ADMIN_GROUP: "stringer-admins"   # members of this group become admins
       # LOCAL_LOGIN: "false"                 # SSO only (keep it on until SSO works!)
       # BACKFILL: "0"                         # never crawl history
-      # FULLTEXT: "0"                         # never save article text to the morgue
+      # FULLTEXT: "auto"                      # the morgue's starting mode: auto | adhoc | manual | fragment (default for a new server)
       REFRESH_MIN: "10"                       # minutes between feed syncs
 volumes:
   stringer-data:
