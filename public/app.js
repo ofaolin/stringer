@@ -2193,14 +2193,39 @@ $('.tk-view').addEventListener('wheel', (e) => {
   v.scrollLeft += e.deltaY;
 }, { passive: false });
 const TICKER_SPEEDS = { stop: 0, slow: 40, medium: 70, fast: 120 };     // px per second; stop = still, scroll by hand
+// The track scrolls from a requestAnimationFrame loop rather than a CSS animation: Safari jumps a paused CSS
+// transform animation around whenever anything inside it restyles (hover underline, the tooltip moving `title`),
+// so hovering made it jitter. Here hover simply stops advancing the offset.
+const tk = { x: 0, half: 0, speed: 0, last: 0, hover: false, raf: 0 };
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 function setTickerSpeed() {
   const track = $('#tk-track');
+  const still = state.tickerSpeed === 'stop' || reducedMotion.matches;
   $('#ticker').classList.toggle('tk-stopped', state.tickerSpeed === 'stop');
-  if (state.tickerSpeed === 'stop') return;
+  if (still) { cancelAnimationFrame(tk.raf); tk.raf = 0; tk.x = 0; track.style.transform = ''; return; }
   $('.tk-view').scrollLeft = 0;                 // drop any hand-scroll offset once it moves again
+  tk.half = track.scrollWidth / 2;              // one copy's width: the loop point
   const px = TICKER_SPEEDS[state.tickerSpeed] || TICKER_SPEEDS.medium;
-  if (track.scrollWidth) track.style.setProperty('--tk-dur', `${Math.max(15, track.scrollWidth / 2 / px)}s`);
+  tk.speed = Math.min(px, tk.half / 15);        // a short list still takes at least 15s to go round
+  if (tk.half) tk.x %= tk.half;
+  if (!tk.raf) { tk.last = 0; tk.raf = requestAnimationFrame(tickerFrame); }
 }
+function tickerFrame(now) {
+  const dt = tk.last ? Math.min(now - tk.last, 100) / 1000 : 0;   // clamp: no leap after a background tab
+  tk.last = now;
+  if (!tk.hover && state.ticker && tk.half && !document.hidden) {
+    tk.x = (tk.x + tk.speed * dt) % tk.half;
+    $('#tk-track').style.transform = `translate3d(${-tk.x}px, 0, 0)`;
+  }
+  tk.raf = requestAnimationFrame(tickerFrame);
+}
+const tickerHover = (on) => () => { tk.hover = on || $('#tk-track').contains(document.activeElement); };
+$('#ticker').addEventListener('pointerenter', tickerHover(true));
+$('#ticker').addEventListener('pointerleave', tickerHover(false));
+$('#tk-track').addEventListener('focusin', () => { tk.hover = true; });
+$('#tk-track').addEventListener('focusout', () => setTimeout(tickerHover($('#ticker').matches(':hover')), 0));
+reducedMotion.addEventListener?.('change', setTickerSpeed);
+new ResizeObserver(() => { if (tk.raf) setTickerSpeed(); }).observe($('#tk-track'));   // fonts / theme change its width
 $('#tk-track').addEventListener('click', (e) => {
   const a = e.target.closest('[data-tk]');
   if (!a || e.ctrlKey || e.metaKey || e.shiftKey || e.button !== 0) return;

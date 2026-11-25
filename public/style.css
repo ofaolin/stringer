@@ -65,20 +65,17 @@ body.no-crt .crt { display: none; }
 .ticker[hidden] { display: none; }
 .tk-mark { color: var(--fg); font-weight: 800; text-shadow: 0 0 8px var(--glow); flex: none; }
 .tk-view { flex: 1; min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, transparent, #000 24px, #000 calc(100% - 24px), transparent); }
-.tk-track { display: inline-flex; width: max-content; animation: tk-scroll var(--tk-dur, 120s) linear infinite; }
-.ticker:hover .tk-track, .tk-track:focus-within { animation-play-state: paused; }
+.tk-track { display: inline-flex; width: max-content; will-change: transform; }   /* moved by tickerFrame() in app.js */
 .tk-item { display: inline-flex; align-items: center; gap: 6px; color: var(--fg2); text-decoration: none; }
 .tk-item:hover { color: var(--fg); text-decoration: underline; }
 .tk-item .tk-src { color: var(--dim); }
 .tk-sep { color: var(--dim); padding: 0 14px; }
-@keyframes tk-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 .tk-copy { display: inline-flex; align-items: center; }
 /* stopped (ticker stop) or reduced motion: still, one copy, scroll it by hand */
-.ticker.tk-stopped .tk-track { animation: none; }
 .ticker.tk-stopped .tk-view { overflow-x: auto; scrollbar-width: none; }
 .ticker.tk-stopped .tk-view::-webkit-scrollbar { display: none; }
 .ticker.tk-stopped .tk-dup { display: none; }
-@media (prefers-reduced-motion: reduce) { .tk-track { animation: none; } .tk-view { overflow-x: auto; scrollbar-width: none; } .tk-dup { display: none; } }
+@media (prefers-reduced-motion: reduce) { .tk-view { overflow-x: auto; scrollbar-width: none; } .tk-dup { display: none; } }
 
 .top {
   display: flex; align-items: center; justify-content: space-between; gap: 16px;
