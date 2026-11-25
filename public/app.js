@@ -2959,7 +2959,7 @@ function setSideHidden(hide) {
 }
 $('#side-hide').addEventListener('click', () => setSideHidden(true));
 $('#side-rail').addEventListener('click', (e) => { const b = e.target.closest('[data-rail]'); if (!b) return; setPane(b.dataset.rail); setSideHidden(false); });
-setSideHidden(store.get('sideHidden', false));
+setSideHidden(store.get('sideHidden', matchMedia('(max-width: 640px)').matches));   // phones start with it folded away
 
 // ───────────────────────── archive panel ─────────────────────────
 const arDlg = $('#dlg-archive');

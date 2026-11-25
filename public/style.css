@@ -58,7 +58,8 @@ body.no-crt .crt { display: none; }
 #boot-log { margin: 0; font: 14px/1.5 var(--font); white-space: pre-wrap; }
 
 /* app shell */
-#app { height: 100vh; display: grid; grid-template-rows: auto auto auto auto 1fr auto; }
+#app { height: 100vh; height: 100dvh; display: grid; grid-template-rows: auto auto auto auto 1fr auto;
+  grid-template-columns: minmax(0, 1fr); }   /* never wider than the window: wide rows scroll or wrap inside it */
 
 /* headline ticker between the header and the toolbar */
 .ticker { display: flex; align-items: center; gap: 10px; padding: 3px 16px; border-bottom: 1px solid var(--line); background: var(--bg2); font-size: 12px; white-space: nowrap; overflow: hidden; }
@@ -97,6 +98,7 @@ body.no-crt .crt { display: none; }
   padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--bg2);
 }
 .group { display: flex; align-items: center; gap: 2px; }
+.tb-filters { display: contents; }   /* only a box of its own on phones (a swipeable row) */
 .label { color: var(--dim); margin-right: 6px; text-shadow: none; }
 .toolbar button {
   background: transparent; border: 1px solid var(--line); color: var(--dim);
@@ -1008,7 +1010,7 @@ body.no-perm-comments-read .pop-split { grid-template-columns: minmax(0, 1fr); }
 @media (max-width: 900px) {
   .pop-split, .pop-split.collapsed { grid-template-columns: minmax(0, 1fr); }
   .pop-cm { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); padding: 0 0 10px; order: 2; }
-  .pop-split.collapsed .pop-cm-rail { position: static; writing-mode: horizontal-tb; visibility: visible; border: 1px solid var(--dim); border-radius: 0; box-shadow: none; padding: 4px 10px; margin-bottom: 8px; }
+  .pop-split.collapsed .pop-cm-rail { position: static; z-index: auto; writing-mode: horizontal-tb; visibility: visible; border: 1px solid var(--dim); border-radius: 0; box-shadow: none; padding: 4px 10px; margin-bottom: 8px; }
 }
 
 /* reader: the text column stays centred in what's left; the dialog widens while the sidebar is open */
@@ -1467,3 +1469,75 @@ mark.rd-q.cur { outline: 2px solid var(--fg); outline-offset: 1px; }
 .ext-keys { display: grid; gap: 4px; border-top: 1px solid var(--line); padding-top: 8px; }
 .ext-keyrow { display: flex; gap: 10px; align-items: baseline; }
 .ext-keyrow > span:first-child { flex: 1; }
+
+/* ───────── phones ─────────
+   One column the width of the screen. The header stacks, the toolbar's filters become a row you swipe sideways,
+   the query box gets a line of its own, popovers fill the screen. (The 860px rules above already stack the
+   sidebar over the results; the sidebar starts folded away on phones — see setSideHidden in app.js.) */
+@media (max-width: 640px) {
+  .top { flex-wrap: wrap; gap: 6px; padding: 8px 12px; }
+  /* the ASCII masthead is 59 columns wide: scale it to fit the screen (a mono glyph is ~0.6em wide) */
+  .logo { font-size: min(11px, calc((100vw - 24px) / 59 / 0.61)); max-width: 100%; overflow: hidden; }
+  .status { display: flex; flex-wrap: wrap; gap: 2px 14px; width: 100%; font-size: 11px; }
+  .status > div:nth-child(4) { display: none; }   /* clock · ads blocked */
+  .ticker { padding: 3px 12px; }
+
+  .toolbar { flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 6px; padding: 6px 0; }
+  .tb-filters { display: flex; gap: 14px; overflow-x: auto; scrollbar-width: none; padding: 2px 12px;
+    mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent); -webkit-overflow-scrolling: touch; }
+  .tb-filters::-webkit-scrollbar { display: none; }
+  .tb-filters .group { flex: none; }
+  .toolbar button { padding: 4px 9px; }
+  .search { flex: none; flex-wrap: wrap; margin: 0 12px; padding: 4px 8px; row-gap: 4px; }
+  .search .qwrap { flex: 1 1 0; }
+  .search .q-status { order: 3; flex-basis: 100%; max-width: none; }
+  .search .q-help { order: 4; }
+  .tabs { padding: 0 12px; }
+
+  .feed { padding: 6px 10px 40px; }
+  .active-filter { padding: 5px 8px; font-size: 11.5px; }
+  .af-extent, .af-extent .link { font-size: 11px; }
+  .story { gap: 4px 8px; padding: 10px 4px; }
+  .story .title { font-size: 14.5px; }
+  .tab-menu { left: 8px; right: 8px; min-width: 0; max-width: none; }
+  .log { padding: 4px 12px 0; }
+  .cmd { padding: 6px 12px 8px; }
+  .cmd .prompt { max-width: 45vw; overflow: hidden; text-overflow: ellipsis; }
+
+  /* popovers and dialogs: the whole screen */
+  dialog { width: 100vw; max-width: 100vw; max-height: 100dvh; margin: 0 0 auto; border-width: 0 0 1px; overflow-y: auto; }
+  .story-dlg, .reader-dlg, .wide-dlg, .stats-dlg, dialog.cm-squeezed { width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; border-width: 0; }
+  .rd-head { padding: 8px 12px; row-gap: 4px; }
+  .rd-tools { display: flex; flex-wrap: wrap; gap: 2px 10px; }
+  .rd-tools > * { white-space: nowrap; }
+  #story-body { padding: 0 12px; }
+  .sd-head, .sd-foot { margin: 0 -12px; padding: 8px 12px; }
+  .sd-head { flex-wrap: wrap; gap: 4px 10px; }
+  .sd-title { font-size: 17px; }
+  .dlg { padding: 12px; }
+  .st-head, .st-foot-bar { margin: 0 -12px; padding: 8px 12px; }
+  .st-rank { grid-template-columns: minmax(0, 1fr) 30% 48px; }
+  .st-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ar-table-wrap, .st-table-wrap { overflow-x: auto; }
+  .user-menu { max-width: calc(100vw - 16px); }
+  .search .q-help { font-size: 11px; padding: 2px 6px; }
+
+  /* the floating query-builder / binder tabs: just their icon, small, on the right edge above the console */
+  .qb, body > .qb { top: auto; bottom: 64px; right: 0; transform: none; align-items: flex-end; }
+  .qb-tab { writing-mode: horizontal-tb; padding: 7px 8px; line-height: 1; letter-spacing: 0; font-size: 14px; }
+  .qb-tab > span:first-child { display: inline-block; width: 1.1em; overflow: hidden; white-space: nowrap; vertical-align: bottom; }
+  .qb-tab .qb-n:empty { display: none; }
+  .qb-panel { width: calc(100vw - 16px); }
+}
+
+/* touch screens: iOS zooms into any field under 16px when it's focused, so fields are 16px there (with the
+   highlight layers drawn under them kept the same size); hover tooltips would stick after a tap, so they're off */
+@media (pointer: coarse) {
+  input, textarea, select, .qwrap input, .qhl, #cmd, #ae-input, .ae-hl, .ae-mirror, .qb-q, .qb-hl { font-size: 16px; }
+  .qwrap input, .qhl { line-height: 22px; height: 22px; }
+  .tip { display: none !important; }
+  .tab .tab-edit { opacity: 1; }
+  /* keyboard hints in the popover footers mean nothing without a keyboard */
+  .sd-foot > span.dim:first-child, .rd-keys, .qb-keys, .st-foot-bar > span.dim:first-child:not(.bd-help) { display: none; }
+  .sd-foot, .rd-foot, .st-foot-bar { justify-content: flex-end; }
+}
