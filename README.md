@@ -8,16 +8,24 @@ No dependencies — just Node 22.13+ (it uses the built-in `node:sqlite`).
 
 ## Self-hosting
 
-**Docker** (recommended):
+**Docker** (recommended). Every push to `main` is built, started and health-checked, then published as
+`ghcr.io/ofaolin/stringer:latest` (and `:sha-<commit>`) for amd64 and arm64:
 ```
-docker compose up -d --build                     # builds the image and starts it → http://localhost:1337
-STRINGER_PORT=8080 docker compose up -d --build  # on another host port
+docker compose pull && docker compose up -d      # runs the published image → http://localhost:1337
+STRINGER_PORT=8080 docker compose up -d          # on another host port
+docker compose up -d --build                     # or build the image from this checkout instead
 ```
 or by hand:
 ```
-docker build -t stringer .
-docker run -d --name stringer -p 1337:1337 -v stringer-data:/data --restart unless-stopped stringer
+docker run -d --name stringer -p 1337:1337 -v stringer-data:/data --restart unless-stopped ghcr.io/ofaolin/stringer:latest
 ```
+To stay current automatically, run [Watchtower](https://containrrr.dev/watchtower/) alongside it; the compose file
+labels the container for it, so it can be limited to labelled containers:
+```
+docker run -d --name watchtower --restart unless-stopped -v /var/run/docker.sock:/var/run/docker.sock \
+  containrrr/watchtower --label-enable --cleanup --interval 3600
+```
+Pin `:sha-<commit>` instead of `:latest` to stay on one build. Updates restart the container; the data volume is kept.
 Open the site and the **setup wizard** runs. It first asks for the **setup code** the server prints in its log
 when it starts unconfigured (`docker compose logs stringer`; also in `setup-token.txt` in the data directory) —
 so only whoever runs the server can claim it. Then: create the admin account, pick which outlets the server follows

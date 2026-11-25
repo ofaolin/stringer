@@ -1,11 +1,14 @@
-# docker compose up -d --build   →   open http://localhost:1337 and follow the setup wizard
+# docker compose pull && docker compose up -d   →   the published image; open http://localhost:1337 and follow the setup wizard
+# docker compose up -d --build                  →   build it from this checkout instead
 name: stringer
 services:
   stringer:
-    build: .
-    image: stringer:latest
+    image: ghcr.io/ofaolin/stringer:latest   # built for amd64 + arm64 on every push to main
+    build: .                                 # used by --build (or if the image can't be pulled)
     container_name: stringer
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=true   # lets Watchtower (with --label-enable) keep it on :latest
     ports:
       - "${STRINGER_PORT:-1337}:1337"   # STRINGER_PORT=8080 docker compose up -d  to use another host port
     volumes:
